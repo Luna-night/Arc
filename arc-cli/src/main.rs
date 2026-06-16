@@ -26,8 +26,9 @@ fn main() {
             if command == "run" {
                 let mut env = arc_core::Environment::new();
                 for top_level in &ast {
-                    if let arc_core::TopLevel::Statement(expr) = top_level {
-                        let _ = env.eval(expr);
+                    // 【注意这里】变体名是 Stmt，不是 Statement
+                    if let arc_core::TopLevel::Stmt(stmt) = top_level {
+                        let _ = env.eval(stmt);
                     }
                 }
             } 
