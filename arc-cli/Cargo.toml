@@ -8,3 +8,4 @@ arc-core = { path = "../arc-core" }
 logos = "0.14"
 # 新增 chumsky 依赖
 chumsky = "0.9" 
+pyo3 = { workspace = true } # 暂时注释掉，因为直接链接 Python 极其复杂

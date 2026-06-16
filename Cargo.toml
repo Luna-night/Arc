@@ -1,3 +1,6 @@
 [workspace]
 members = ["arc-core", "arc-cli", "arc-lsp"]
 resolver = "2"
+
+[workspace.dependencies]
+pyo3 = { version = "0.23", features = ["auto-initialize"] }
