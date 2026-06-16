@@ -54,28 +54,26 @@ pub fn compile_to_llvm_ir(ast: &[TopLevel]) -> String {
     }
 
     let mut final_ir = ir_globals;
-        // 3. 生成所有自定义函数的 IR
+
+    // 3. 生成所有自定义函数的 IR
     for top in ast {
         if let TopLevel::FuncDecl(func) = top {
-            // 【关键】不再传递 reg_counter，gen_function 内部会自己从 0 开始
-            final_ir.push_str(&gen_function(func, &mut block_counter, &string_globals, ast));
+            let mut func_reg_counter = 0;
+            final_ir.push_str(&gen_function(func, &mut func_reg_counter, &mut block_counter, &string_globals, ast));
         }
     }
-
 
     // 4. 生成 main 函数
     final_ir.push_str("define i32 @main() {\n");
     let mut main_blocks: Vec<(String, String)> = vec![("entry".to_string(), String::new())];
     let mut main_current_block = "entry".to_string();
     let mut main_vars: HashMap<String, String> = HashMap::new();
-    
-    // 【核心修复】main 函数的寄存器计数器也必须从 0 开始！
     let mut main_reg_counter = 0;
 
-    // 4.1 预分配 main 中的变量
+    // 4.1 预分配 main 中的变量 (使用命名寄存器 %tX)
     for top in ast {
         if let TopLevel::LetDecl { name, .. } = top {
-            let ptr = format!("%{}", main_reg_counter); main_reg_counter += 1;
+            let ptr = format!("%t{}", main_reg_counter); main_reg_counter += 1;
             main_vars.insert(name.clone(), ptr.clone());
             emit(&mut main_blocks, &main_current_block, &format!("  {} = alloca i64\n", ptr));
         }
@@ -97,8 +95,7 @@ pub fn compile_to_llvm_ir(ast: &[TopLevel]) -> String {
     }
 
     emit(&mut main_blocks, &main_current_block, "  ret i32 0\n");
-    
-    // 组装 main 块
+
     for (name, code) in &main_blocks {
         final_ir.push_str(&format!("{}:\n", name));
         final_ir.push_str(code);
@@ -108,20 +105,17 @@ pub fn compile_to_llvm_ir(ast: &[TopLevel]) -> String {
     final_ir
 }
 
-// 【核心修复】生成单个自定义函数的 IR
-fn gen_function(func: &FuncDecl, block_cnt: &mut i32, strings: &HashMap<String, String>, ast: &[TopLevel]) -> String {
+// 【终极修复】生成单个自定义函数的 IR (全面使用命名寄存器 %argX 和 %tX)
+fn gen_function(func: &FuncDecl, reg: &mut i32, block_cnt: &mut i32, strings: &HashMap<String, String>, ast: &[TopLevel]) -> String {
     let mut blocks: Vec<(String, String)> = vec![("entry".to_string(), String::new())];
     let mut current_block = "entry".to_string();
     let mut vars: HashMap<String, String> = HashMap::new();
-    
-    // 【核心修复 1】函数体内的指令寄存器严格从 0 开始！
-    let mut reg = 0; 
 
-    // 1. 生成函数签名 (参数使用命名寄存器 %arg0, %arg1，避免占用数字编号空间)
+    // 1. 生成函数签名 (【核心】参数使用命名寄存器 %arg0, %arg1，彻底避免占用数字空间)
     let mut params_sig = Vec::new();
     let mut param_names = Vec::new();
     for (i, p) in func.params.iter().enumerate() {
-        let p_reg = format!("%arg{}", i); // 【核心修复 2】参数使用命名寄存器
+        let p_reg = format!("%arg{}", i); 
         params_sig.push(format!("i64 {}", p_reg));
         param_names.push((p.name.clone(), p_reg));
     }
@@ -129,9 +123,9 @@ fn gen_function(func: &FuncDecl, block_cnt: &mut i32, strings: &HashMap<String, 
     let mut ir = String::new();
     ir.push_str(&format!("define i64 @{}({}) {{\n", func.name, params_sig.join(", ")));
 
-    // 2. 在 entry 块中为参数分配内存并存储 (模拟局部变量)
+    // 2. 在 entry 块中为参数分配内存并存储 (使用 %tX)
     for (name, p_reg) in param_names {
-        let ptr = format!("%{}", reg); reg += 1; // 内部指令从 %0 开始
+        let ptr = format!("%t{}", reg); *reg += 1;
         emit(&mut blocks, &current_block, &format!("  {} = alloca i64\n", ptr));
         emit(&mut blocks, &current_block, &format!("  store i64 {}, i64* {}\n", p_reg, ptr));
         vars.insert(name, ptr);
@@ -139,13 +133,10 @@ fn gen_function(func: &FuncDecl, block_cnt: &mut i32, strings: &HashMap<String, 
 
     // 3. 生成函数体
     for stmt in &func.body {
-        gen_stmt(stmt, &mut blocks, &mut current_block, &mut reg, block_cnt, &vars, strings, ast);
+        gen_stmt(stmt, &mut blocks, &mut current_block, reg, block_cnt, &vars, strings, ast);
     }
-    
-    // ... 下面的代码 (has_ret_i64 等) 保持不变 ...
 
-    // ... 下面的代码保持不变 ...
-    // 4. 确保函数有 return 指令 (防止 LLVM 报错)
+    // 4. 确保函数有 return 指令
     let has_ret_i64 = blocks.iter().any(|(_, code)| code.contains("ret i64"));
     if !has_ret_i64 {
         emit(&mut blocks, &current_block, "  ret i64 0\n");
@@ -180,9 +171,7 @@ fn new_label(counter: &mut i32) -> String {
 
 fn gen_stmt(stmt: &Stmt, blocks: &mut Vec<(String, String)>, current_block: &mut String, reg: &mut i32, block_cnt: &mut i32, vars: &HashMap<String, String>, strings: &HashMap<String, String>, ast: &[TopLevel]) {
     match stmt {
-        Stmt::Expr(e) => {
-            gen_expr(e, blocks, current_block, reg, vars, strings, ast);
-        }
+        Stmt::Expr(e) => { gen_expr(e, blocks, current_block, reg, vars, strings, ast); }
         Stmt::If(cond, then_stmts, else_stmts) => {
             let (cond_reg, _cond_ty) = gen_expr(cond, blocks, current_block, reg, vars, strings, ast);
             let then_lbl = new_label(block_cnt);
@@ -216,7 +205,6 @@ fn gen_stmt(stmt: &Stmt, blocks: &mut Vec<(String, String)>, current_block: &mut
             emit(blocks, current_block, &format!("  br label %{}\n", cond_lbl));
             *current_block = merge_lbl;
         }
-        // 【核心新增】处理 Return 语句
         Stmt::Return(e) => {
             let (val_reg, _ty) = gen_expr(e, blocks, current_block, reg, vars, strings, ast);
             emit(blocks, current_block, &format!("  ret i64 {}\n", val_reg));
@@ -227,31 +215,30 @@ fn gen_stmt(stmt: &Stmt, blocks: &mut Vec<(String, String)>, current_block: &mut
 fn gen_expr(expr: &Expr, blocks: &mut Vec<(String, String)>, current_block: &mut String, reg: &mut i32, vars: &HashMap<String, String>, strings: &HashMap<String, String>, ast: &[TopLevel]) -> (String, String) {
     match expr {
         Expr::Number(n) => {
-            let r = format!("%{}", reg); *reg += 1;
+            let r = format!("%t{}", reg); *reg += 1; // 【核心】使用 %tX
             emit(blocks, current_block, &format!("  {} = add i64 0, {}\n", r, n));
             (r, "i64".to_string())
         }
         Expr::FloatLit(n) => {
-            let r = format!("%{}", reg); *reg += 1;
+            let r = format!("%t{}", reg); *reg += 1;
             emit(blocks, current_block, &format!("  {} = fadd double 0.000000e+00, {:e}\n", r, n));
             (r, "double".to_string())
         }
         Expr::Bool(b) => {
-            let r = format!("%{}", reg); *reg += 1;
+            let r = format!("%t{}", reg); *reg += 1;
             emit(blocks, current_block, &format!("  {} = add i1 0, {}\n", r, if *b { 1 } else { 0 }));
             (r, "i1".to_string())
         }
         Expr::Identifier(name) => {
             let ptr = vars.get(name).unwrap();
-            let r = format!("%{}", reg); *reg += 1;
+            let r = format!("%t{}", reg); *reg += 1;
             emit(blocks, current_block, &format!("  {} = load i64, i64* {}\n", r, ptr));
             (r, "i64".to_string())
         }
         Expr::BinOp(l, op, r_expr) => {
             let (l_reg, l_ty) = gen_expr(l, blocks, current_block, reg, vars, strings, ast);
             let (r_reg, r_ty) = gen_expr(r_expr, blocks, current_block, reg, vars, strings, ast);
-            let res = format!("%{}", reg); *reg += 1;
-            
+            let res = format!("%t{}", reg); *reg += 1;
             if l_ty == "double" && r_ty == "double" {
                 let inst = match op.as_str() { "+" => "fadd", "-" => "fsub", "*" => "fmul", "/" => "fdiv", _ => panic!("Unknown float op") };
                 emit(blocks, current_block, &format!("  {} = {} double {}, {}\n", res, inst, l_reg, r_reg));
@@ -265,8 +252,7 @@ fn gen_expr(expr: &Expr, blocks: &mut Vec<(String, String)>, current_block: &mut
         Expr::Compare(l, op, r_expr) => {
             let (l_reg, l_ty) = gen_expr(l, blocks, current_block, reg, vars, strings, ast);
             let (r_reg, r_ty) = gen_expr(r_expr, blocks, current_block, reg, vars, strings, ast);
-            let res = format!("%{}", reg); *reg += 1;
-            
+            let res = format!("%t{}", reg); *reg += 1;
             if l_ty == "double" && r_ty == "double" {
                 let inst = match op.as_str() { "==" => "fcmp oeq", "!=" => "fcmp one", "<" => "fcmp olt", ">" => "fcmp ogt", "<=" => "fcmp ole", ">=" => "fcmp oge", _ => panic!("Unknown float cmp") };
                 emit(blocks, current_block, &format!("  {} = {} double {}, {}\n", res, inst, l_reg, r_reg));
@@ -283,29 +269,23 @@ fn gen_expr(expr: &Expr, blocks: &mut Vec<(String, String)>, current_block: &mut
             (val_reg, "i64".to_string())
         }
         Expr::Call(func_name, args) => {
-            // 1. 检查是否是自定义函数
             let mut is_custom = false;
             for t in ast {
                 if let TopLevel::FuncDecl(f) = t {
-                    if f.name == *func_name {
-                        is_custom = true;
-                        break;
-                    }
+                    if f.name == *func_name { is_custom = true; break; }
                 }
             }
 
             if is_custom {
-                // 2. 生成自定义函数调用 (统一使用 i64)
                 let mut call_args = Vec::new();
                 for arg in args {
                     let (r, _ty) = gen_expr(arg, blocks, current_block, reg, vars, strings, ast);
                     call_args.push(format!("i64 {}", r));
                 }
-                let res = format!("%{}", reg); *reg += 1;
+                let res = format!("%t{}", reg); *reg += 1;
                 emit(blocks, current_block, &format!("  {} = call i64 @{}({})\n", res, func_name, call_args.join(", ")));
                 return (res, "i64".to_string());
             } else {
-                // 3. 原有的 Bridge 函数调用逻辑
                 let mut param_types: Vec<String> = vec![];
                 let mut ret_ty = "Int".to_string();
                 for t in ast {
@@ -328,7 +308,7 @@ fn gen_expr(expr: &Expr, blocks: &mut Vec<(String, String)>, current_block: &mut
                     
                     if expected_ty == "Int" {
                         if actual_ty == "i64" {
-                            let tr = format!("%{}", reg); *reg += 1;
+                            let tr = format!("%t{}", reg); *reg += 1;
                             emit(blocks, current_block, &format!("  {} = trunc i64 {} to i32\n", tr, r));
                             call_args.push(format!("i32 {}", tr));
                         }
@@ -336,7 +316,7 @@ fn gen_expr(expr: &Expr, blocks: &mut Vec<(String, String)>, current_block: &mut
                         if actual_ty == "double" {
                             call_args.push(format!("double {}", r));
                         } else if actual_ty == "i64" {
-                            let cv = format!("%{}", reg); *reg += 1;
+                            let cv = format!("%t{}", reg); *reg += 1;
                             emit(blocks, current_block, &format!("  {} = sitofp i64 {} to double\n", cv, r));
                             call_args.push(format!("double {}", cv));
                         }
@@ -344,19 +324,19 @@ fn gen_expr(expr: &Expr, blocks: &mut Vec<(String, String)>, current_block: &mut
                         if let Expr::StringLit(s) = arg {
                             let name = strings.get(s).unwrap();
                             let len = s.len() + 1;
-                            let ptr_reg = format!("%{}", reg); *reg += 1;
+                            let ptr_reg = format!("%t{}", reg); *reg += 1;
                             emit(blocks, current_block, &format!("  {} = getelementptr inbounds [{} x i8], [{} x i8]* @{}, i64 0, i64 0\n", ptr_reg, len, len, name));
                             call_args.push(format!("i8* {}", ptr_reg));
                         }
                     }
                 }
                 
-                let res = format!("%{}", reg); *reg += 1;
+                let res = format!("%t{}", reg); *reg += 1;
                 let rt = if ret_ty == "Int" { "i32" } else { "double" };
                 emit(blocks, current_block, &format!("  {} = call {} @{}({})\n", res, rt, func_name, call_args.join(", ")));
                 
                 if ret_ty == "Int" {
-                    let ext = format!("%{}", reg); *reg += 1;
+                    let ext = format!("%t{}", reg); *reg += 1;
                     emit(blocks, current_block, &format!("  {} = sext i32 {} to i64\n", ext, res));
                     return (ext, "i64".to_string());
                 }
@@ -367,21 +347,21 @@ fn gen_expr(expr: &Expr, blocks: &mut Vec<(String, String)>, current_block: &mut
             if let Expr::StringLit(s) = &**inner {
                 let name = strings.get(s).unwrap();
                 let len = s.len() + 1;
-                let fmt_ptr_reg = format!("%{}", reg); *reg += 1;
-                let str_ptr_reg = format!("%{}", reg); *reg += 1;
+                let fmt_ptr_reg = format!("%t{}", reg); *reg += 1;
+                let str_ptr_reg = format!("%t{}", reg); *reg += 1;
                 emit(blocks, current_block, &format!("  {} = getelementptr inbounds [4 x i8], [4 x i8]* @.fmt_str, i64 0, i64 0\n", fmt_ptr_reg));
                 emit(blocks, current_block, &format!("  {} = getelementptr inbounds [{} x i8], [{} x i8]* @{}, i64 0, i64 0\n", str_ptr_reg, len, len, name));
-                let call_res = format!("%{}", reg); *reg += 1;
+                let call_res = format!("%t{}", reg); *reg += 1;
                 emit(blocks, current_block, &format!("  {} = call i32 (i8*, ...) @printf(i8* {}, i8* {})\n", call_res, fmt_ptr_reg, str_ptr_reg));
                 (call_res, "i32".to_string())
             } else {
                 let (r, ty) = gen_expr(inner, blocks, current_block, reg, vars, strings, ast);
-                let fmt_int_ptr_reg = format!("%{}", reg); *reg += 1;
+                let fmt_int_ptr_reg = format!("%t{}", reg); *reg += 1;
                 
                 let val_to_print = if ty == "double" {
                     r
                 } else {
-                    let tr = format!("%{}", reg); *reg += 1;
+                    let tr = format!("%t{}", reg); *reg += 1;
                     emit(blocks, current_block, &format!("  {} = trunc i64 {} to i32\n", tr, r));
                     tr
                 };
@@ -389,14 +369,14 @@ fn gen_expr(expr: &Expr, blocks: &mut Vec<(String, String)>, current_block: &mut
                 let fmt_to_use = if ty == "double" { "@.fmt_float" } else { "@.fmt_int" };
                 let arg_to_use = if ty == "double" { format!("double {}", val_to_print) } else { format!("i32 {}", val_to_print) };
                 
-                let call_res = format!("%{}", reg); *reg += 1;
+                let call_res = format!("%t{}", reg); *reg += 1;
                 emit(blocks, current_block, &format!("  {} = getelementptr inbounds [4 x i8], [4 x i8]* {}, i64 0, i64 0\n", fmt_int_ptr_reg, fmt_to_use));
                 emit(blocks, current_block, &format!("  {} = call i32 (i8*, ...) @printf(i8* {}, {})\n", call_res, fmt_int_ptr_reg, arg_to_use));
                 (call_res, "i32".to_string())
             }
         }
         _ => {
-            let r = format!("%{}", reg); *reg += 1;
+            let r = format!("%t{}", reg); *reg += 1;
             emit(blocks, current_block, &format!("  {} = add i64 0, 0\n", r));
             (r, "i64".to_string())
         }
