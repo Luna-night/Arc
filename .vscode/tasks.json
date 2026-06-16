@@ -1,0 +1,15 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Compile Arc LSP",
+            "type": "shell",
+            "command": "cargo",
+            "args": ["build", "--bin", "arc-lsp"],
+            "options": {
+                "cwd": "${workspaceFolder}/.." 
+            },
+            "problemMatcher": "$rustc"
+        }
+    ]
+}

@@ -1,0 +1,10 @@
+[package]
+name = "arc-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arc-core = { path = "../arc-core" }
+logos = "0.14"
+# 新增 chumsky 依赖
+chumsky = "0.9" 

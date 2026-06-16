@@ -1,0 +1,14 @@
+[package]
+name = "arc-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 1. 词法分析 (Lexer): 极快，基于宏生成状态机
+logos = "0.14"
+# 2. 语法分析 (Parser): 组合子解析器，错误提示极其友好，适合语言开发
+chumsky = "0.9"
+# 3. 错误处理
+thiserror = "1.0"
+# 4. 彩色终端输出 (用于漂亮的错误提示)
+ariadne = "0.4" 

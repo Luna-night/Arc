@@ -1,0 +1,19 @@
+# Rust 编译产物
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Node.js / VS Code 插件编译产物
+arc-language/node_modules/
+arc-language/out/
+.vscode-test/
+
+# Arc 编译器生成的临时文件
+arc_out.ll
+arc_app
+arc_app.exe
+test.arc
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
