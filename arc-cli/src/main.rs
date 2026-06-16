@@ -4,19 +4,6 @@ use chumsky::Parser;
 use std::env;
 use std::fs;
 use std::process::Command;
-use pyo3::prelude::*;
-
-// Python 包装函数示例
-// 这些函数将在 LLVM IR 中被调用
-
-#[pyfunction]
-fn py_math_sqrt() -> PyResult<f64> {
-    Python::with_gil(|py| {
-        let math = PyModule::import(py, "math")?;
-        let result: f64 = math.getattr("sqrt")?.call0()?.extract()?;
-        Ok(result)
-    })
-}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -37,11 +24,15 @@ fn main() {
     match parser().parse(tokens) {
         Ok(ast) => {
             if command == "run" {
-                println!("Interpreter mode: Python Bridge not fully supported yet. Please use 'build'.");
+                let mut env = arc_core::Environment::new();
+                for top_level in &ast {
+                    if let arc_core::TopLevel::Statement(expr) = top_level {
+                        let _ = env.eval(expr);
+                    }
+                }
             } 
             else if command == "build" {
-                println!("⚙️  Generating LLVM IR with Python Bridge...");
-                
+                println!("⚙️  Generating LLVM IR with Arc Bridge...");
                 let llvm_ir = codegen::compile_to_llvm_ir(&ast);
                 
                 let ll_filename = "arc_out.ll";
@@ -51,13 +42,11 @@ fn main() {
                 println!("🔨 Compiling to native binary using Clang...");
                 let output_bin = "arc_app";
                 
-                // 需要链接 Python 库
                 let status = Command::new("clang")
                     .arg(ll_filename)
                     .arg("-O3")
                     .arg("-o")
                     .arg(output_bin)
-                    // 这里需要添加 pyo3 的链接 flags
                     .status()
                     .expect("❌ Failed to execute clang.");
 

@@ -8,44 +8,31 @@ pub mod codegen;
 #[derive(Logos, Debug, PartialEq, Eq, Clone, Hash)]
 #[logos(skip r"[ \t\n\f]+")]
 pub enum Token {
-    #[token("let")]
-    Let,
-    #[token("print")]
-    Print,
-    #[token("bridge")]
-    Bridge,
-    #[token("func")]
-    Func,
-    #[token("->")]
-    RArrow,
-    #[token("{")]
-    LBrace,
-    #[token("}")]
-    RBrace,
+    #[token("let")] Let,
+    #[token("print")] Print,
+    #[token("bridge")] Bridge,
+    #[token("func")] Func,
+    #[token("->")] RArrow,
+    #[token("{")] LBrace,
+    #[token("}")] RBrace,
+    #[token(",")] Comma,
     
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Identifier(String),
     
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().unwrap())]
+    #[regex(r"-?[0-9]+", |lex| lex.slice().parse::<i64>().unwrap())]
     Number(i64),
     
     #[regex(r#""[^"]*""#, |lex| lex.slice()[1..lex.slice().len()-1].to_string())]
     StringLit(String),
     
-    #[token("=")]
-    Assign,
-    #[token(";")]
-    Semicolon,
-    #[token("(")]
-    LParen,
-    #[token(")")]
-    RParen,
-    #[token("py")]
-    Py,
-    #[token("Int")]
-    TypeInt,
-    #[token("Float")]
-    TypeFloat,
+    #[token("=")] Assign,
+    #[token(";")] Semicolon,
+    #[token("(")] LParen,
+    #[token(")")] RParen,
+    
+    #[token("Int")] TypeInt,
+    #[token("Float")] TypeFloat,
 }
 
 impl fmt::Display for Token {
@@ -58,6 +45,7 @@ impl fmt::Display for Token {
             Token::RArrow => write!(f, "->"),
             Token::LBrace => write!(f, "{{"),
             Token::RBrace => write!(f, "}}"),
+            Token::Comma => write!(f, ","),
             Token::Identifier(s) => write!(f, "identifier '{}'", s),
             Token::Number(n) => write!(f, "number {}", n),
             Token::StringLit(s) => write!(f, "string '{}'", s),
@@ -65,7 +53,6 @@ impl fmt::Display for Token {
             Token::Semicolon => write!(f, ";"),
             Token::LParen => write!(f, "("),
             Token::RParen => write!(f, ")"),
-            Token::Py => write!(f, "py"),
             Token::TypeInt => write!(f, "Int"),
             Token::TypeFloat => write!(f, "Float"),
         }
@@ -78,22 +65,22 @@ pub enum Expr {
     StringLit(String),
     Identifier(String),
     Print(Box<Expr>),
-    Call(String), 
+    Call(String, Vec<Expr>), 
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum BridgeParam {
-    Param { name: String, ty: String }, // 例如: Param { name: "x", ty: "Float" }
+    Param { name: String, ty: String },
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum TopLevel {
     BridgeDecl {
-        lang: String,  // "c" 或 "py"
-        lib: String,   // 例如 "math"
-        name: String,  // 函数名
+        lang: String,
+        lib: String,
+        name: String,
         params: Vec<BridgeParam>,
-        ret_ty: String, // "Int" 或 "Float"
+        ret_ty: String,
     },
     Statement(Expr),
 }
@@ -119,52 +106,46 @@ pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
         let str_lit = select! { Token::StringLit(s) => Expr::StringLit(s) };
         let ident = select! { Token::Identifier(i) => Expr::Identifier(i) };
 
+        // 【核心修复】放弃 then_ignore，全部用 .then 保留，然后在 .map 里用 _ 丢弃！
         let call = select! { Token::Identifier(name) => name }
-            .then_ignore(just(Token::LParen))
-            .ignore_then(just(Token::RParen))
-            .map(|name| Expr::Call(name));
+            .then(just(Token::LParen))
+            .then(expr.clone().separated_by(just(Token::Comma)).allow_trailing())
+            .then(just(Token::RParen))
+            .map(|(((name, _lp), args), _rp)| Expr::Call(name, args));
 
         let print_expr = just(Token::Print)
-            .ignore_then(just(Token::LParen))
-            .ignore_then(expr.clone())
-            .then_ignore(just(Token::RParen))
-            .map(|e| Expr::Print(Box::new(e)));
+            .then(just(Token::LParen))
+            .then(expr.clone())
+            .then(just(Token::RParen))
+            .map(|(((_print, _lp), e), _rp)| Expr::Print(Box::new(e)));
 
         print_expr.or(call).or(num).or(str_lit).or(ident)
     });
 
-    // 解析单个参数
     let param = select! { Token::Identifier(name) => name }
-        .then_ignore(just(Token::Assign))
-        .ignore_then(select! { Token::TypeInt => "Int".to_string(), Token::TypeFloat => "Float".to_string() })
-        .map(|(name, ty)| BridgeParam::Param { name, ty });
+        .then(just(Token::Assign))
+        .then(select! { Token::TypeInt => "Int".to_string(), Token::TypeFloat => "Float".to_string() })
+        .map(|((name, _eq), ty)| BridgeParam::Param { name, ty });
 
-    // 解析参数列表
     let params_list = param
-        .separated_by(just(Token::Assign))
+        .separated_by(just(Token::Comma))
         .allow_trailing();
 
-    // 解析 Bridge 声明
+    // 【核心修复】同样使用 .then 和 .map 手动解构，彻底避免类型推导错误
     let bridge_decl = just(Token::Bridge)
-        .ignore_then(select! { Token::Identifier(lang) => lang })
+        .then(select! { Token::Identifier(lang) => lang })
         .then(select! { Token::StringLit(lib) => lib })
-        .ignore_then(just(Token::LBrace))
-        .ignore_then(just(Token::Func))
+        .then(just(Token::LBrace))
+        .then(just(Token::Func))
         .then(select! { Token::Identifier(name) => name })
-        .ignore_then(just(Token::LParen))
+        .then(just(Token::LParen))
         .then(params_list)
-        .ignore_then(just(Token::RParen))
-        .ignore_then(just(Token::RArrow))
-        .ignore_then(select! { Token::TypeInt => "Int".to_string(), Token::TypeFloat => "Float".to_string() })
-        .ignore_then(just(Token::RBrace))
-        .map(|((((lang, lib), name), params), ret_ty)| {
-            TopLevel::BridgeDecl {
-                lang,
-                lib,
-                name,
-                params,
-                ret_ty,
-            }
+        .then(just(Token::RParen))
+        .then(just(Token::RArrow))
+        .then(select! { Token::TypeInt => "Int".to_string(), Token::TypeFloat => "Float".to_string() })
+        .then(just(Token::RBrace))
+        .map(|(((((((((((_bridge, lang), lib), _lb), _func), name), _lp), params), _rp), _ra), ret_ty), _rb)| {
+            TopLevel::BridgeDecl { lang, lib, name, params, ret_ty }
         });
 
     let statement = expr.map(TopLevel::Statement);
@@ -190,7 +171,7 @@ impl Environment {
             Expr::Identifier(name) => {
                 self.variables.get(name).cloned().ok_or_else(|| format!("Undefined variable: {}", name))
             }
-            Expr::Call(name) => Err(format!("Bridge function '{}' cannot be called in interpreter mode. Please use 'build'.", name)),
+            Expr::Call(name, _) => Err(format!("Bridge function '{}' cannot be called in interpreter mode.", name)),
             Expr::Print(e) => {
                 let val = self.eval(e)?;
                 println!("Arc Output > {}", val);
