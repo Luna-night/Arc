@@ -3,7 +3,6 @@ use chumsky::prelude::*;
 use std::collections::HashMap;
 use std::fmt;
 
-// 声明 codegen 模块
 pub mod codegen;
 
 #[derive(Logos, Debug, PartialEq, Eq, Clone, Hash)]
@@ -13,6 +12,16 @@ pub enum Token {
     Let,
     #[token("print")]
     Print,
+    #[token("bridge")]
+    Bridge,
+    #[token("func")]
+    Func,
+    #[token("->")]
+    RArrow,
+    #[token("{")]
+    LBrace,
+    #[token("}")]
+    RBrace,
     
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Identifier(String),
@@ -38,6 +47,11 @@ impl fmt::Display for Token {
         match self {
             Token::Let => write!(f, "let"),
             Token::Print => write!(f, "print"),
+            Token::Bridge => write!(f, "bridge"),
+            Token::Func => write!(f, "func"),
+            Token::RArrow => write!(f, "->"),
+            Token::LBrace => write!(f, "{{"),
+            Token::RBrace => write!(f, "}}"),
             Token::Identifier(s) => write!(f, "identifier '{}'", s),
             Token::Number(n) => write!(f, "number {}", n),
             Token::StringLit(s) => write!(f, "string '{}'", s),
@@ -55,6 +69,16 @@ pub enum Expr {
     StringLit(String),
     Identifier(String),
     Print(Box<Expr>),
+    Call(String), 
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum TopLevel {
+    BridgeDecl {
+        lib: String,
+        name: String,
+    },
+    Statement(Expr),
 }
 
 #[derive(Debug, Clone)]
@@ -72,11 +96,16 @@ impl fmt::Display for Value {
     }
 }
 
-pub fn parser() -> impl Parser<Token, Vec<Expr>, Error = Simple<Token>> {
+pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
     let expr = recursive(|expr| {
         let num = select! { Token::Number(n) => Expr::Number(n) };
         let str_lit = select! { Token::StringLit(s) => Expr::StringLit(s) };
         let ident = select! { Token::Identifier(i) => Expr::Identifier(i) };
+
+        let call = select! { Token::Identifier(name) => name }
+            .then_ignore(just(Token::LParen))
+            .then_ignore(just(Token::RParen))
+            .map(|name| Expr::Call(name));
 
         let print_expr = just(Token::Print)
             .ignore_then(just(Token::LParen))
@@ -84,10 +113,28 @@ pub fn parser() -> impl Parser<Token, Vec<Expr>, Error = Simple<Token>> {
             .then_ignore(just(Token::RParen))
             .map(|e| Expr::Print(Box::new(e)));
 
-        print_expr.or(num).or(str_lit).or(ident)
+        print_expr.or(call).or(num).or(str_lit).or(ident)
     });
 
-    expr.repeated().then_ignore(end())
+    // 【核心修复】使用 then_ignore 保留左侧提取的值，忽略右侧的符号
+    let bridge_decl = just(Token::Bridge)
+        .ignore_then(select! { Token::Identifier(_) => () }) // 忽略 'c'
+        .ignore_then(select! { Token::StringLit(lib) => lib }) // 提取 lib (String)
+        .then_ignore(just(Token::LBrace)) // 【修复】保留 lib，忽略 '{'
+        .then_ignore(just(Token::Func))   // 【修复】保留 lib，忽略 'func'
+        .then(select! { Token::Identifier(name) => name }) // 提取 name，此时组合成 (lib, name)
+        .then_ignore(just(Token::LParen)) // 保留 (lib, name)，忽略 '('
+        .then_ignore(just(Token::RParen)) // 忽略 ')'
+        .then_ignore(just(Token::RArrow)) // 忽略 '->'
+        .then_ignore(select! { Token::Identifier(_) => () }) // 忽略 返回类型 (如 Int)
+        .then_ignore(just(Token::RBrace)) // 忽略 '}'
+        .map(|(lib, name)| TopLevel::BridgeDecl { lib, name });
+
+    let statement = expr.map(TopLevel::Statement);
+
+    bridge_decl.or(statement)
+        .repeated()
+        .then_ignore(end())
 }
 
 pub struct Environment {
@@ -106,6 +153,7 @@ impl Environment {
             Expr::Identifier(name) => {
                 self.variables.get(name).cloned().ok_or_else(|| format!("Undefined variable: {}", name))
             }
+            Expr::Call(name) => Err(format!("Bridge function '{}' cannot be called in interpreter mode. Please use 'build'.", name)),
             Expr::Print(e) => {
                 let val = self.eval(e)?;
                 println!("Arc Output > {}", val);
