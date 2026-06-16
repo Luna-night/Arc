@@ -217,7 +217,7 @@ pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
         .ignore_then(stmt.repeated())
         .then_ignore(just(Token::RBrace));
 
-    let top_if = just(Token::If)
+    let _top_if = just(Token::If)
         .ignore_then(just(Token::LParen))
         .ignore_then(compare.clone())
         .then_ignore(just(Token::RParen))
@@ -226,7 +226,7 @@ pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
         .map(|((cond, then), else_block)| TopLevel::Stmt(Stmt::If(Box::new(cond), then, else_block.unwrap_or_default())));
 
     // 【新增】顶层 While 语句
-    let top_while = just(Token::While)
+    let _top_while = just(Token::While)
         .ignore_then(just(Token::LParen))
         .ignore_then(compare.clone())
         .then_ignore(just(Token::RParen))
