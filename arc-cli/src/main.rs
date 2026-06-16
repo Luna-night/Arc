@@ -23,13 +23,22 @@ fn main() {
     
     match parser().parse(tokens) {
         Ok(ast) => {
-            if command == "run" {
+             if command == "run" {
                 let mut env = arc_core::Environment::new();
+                
+                // 【新增】先注册所有函数
                 for top_level in &ast {
-                    // 【注意这里】变体名是 Stmt，不是 Statement
-                    if let arc_core::TopLevel::Stmt(stmt) = top_level {
-                        let _ = env.eval(stmt);
+                    if let arc_core::TopLevel::FuncDecl(func) = top_level {
+                        env.functions.insert(func.name.clone(), func.clone());
                     }
+                }
+
+                // 然后执行其他语句
+                for top_level in &ast {
+                    if let arc_core::TopLevel::Stmt(stmt) = top_level {
+                        let _ = env.eval_stmt(stmt);
+                    }
+                    // LetDecl 在解释器中暂时忽略，或者你可以自己实现
                 }
             } 
             else if command == "build" {

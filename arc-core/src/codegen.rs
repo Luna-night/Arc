@@ -104,9 +104,12 @@ fn new_label(counter: &mut i32) -> String {
     name
 }
 
+// 【修复 1】完整的 gen_stmt 函数
 fn gen_stmt(stmt: &Stmt, blocks: &mut Vec<(String, String)>, current_block: &mut String, reg: &mut i32, block_cnt: &mut i32, vars: &HashMap<String, String>, strings: &HashMap<String, String>, ast: &[TopLevel]) {
     match stmt {
-        Stmt::Expr(e) => { gen_expr(e, blocks, current_block, reg, vars, strings, ast); }
+        Stmt::Expr(e) => {
+            gen_expr(e, blocks, current_block, reg, vars, strings, ast);
+        }
         Stmt::If(cond, then_stmts, else_stmts) => {
             let (cond_reg, _cond_ty) = gen_expr(cond, blocks, current_block, reg, vars, strings, ast);
             let then_lbl = new_label(block_cnt);
@@ -140,9 +143,28 @@ fn gen_stmt(stmt: &Stmt, blocks: &mut Vec<(String, String)>, current_block: &mut
             emit(blocks, current_block, &format!("  br label %{}\n", cond_lbl));
             *current_block = merge_lbl;
         }
+        // 【新增】Return 语句 (AOT 暂不支持，若触发则 panic 提示使用 run 模式)
+        Stmt::Return(_) => {
+            panic!("AOT Codegen: 'return' is not yet supported in build mode. Please use 'run' (interpreter mode).");
+        }
     }
 }
 
+// 【修复 2】完整的 collect_stmt_strings 函数
+fn collect_stmt_strings(stmt: &Stmt, globals: &mut HashMap<String, String>, counter: &mut i32) {
+    match stmt {
+        Stmt::Expr(e) => collect_expr_strings(e, globals, counter),
+        Stmt::If(_, then_stmts, else_stmts) => {
+            for s in then_stmts { collect_stmt_strings(s, globals, counter); }
+            for s in else_stmts { collect_stmt_strings(s, globals, counter); }
+        }
+        Stmt::While(_, body_stmts) => {
+            for s in body_stmts { collect_stmt_strings(s, globals, counter); }
+        }
+        // 【新增】收集 Return 语句中的字符串
+        Stmt::Return(e) => collect_expr_strings(e, globals, counter),
+    }
+}
 // 返回 (寄存器名, LLVM 类型名 "i64", "double", "i1", "i8*")
 fn gen_expr(expr: &Expr, blocks: &mut Vec<(String, String)>, current_block: &mut String, reg: &mut i32, vars: &HashMap<String, String>, strings: &HashMap<String, String>, ast: &[TopLevel]) -> (String, String) {
     match expr {
@@ -321,18 +343,6 @@ fn gen_expr(expr: &Expr, blocks: &mut Vec<(String, String)>, current_block: &mut
     }
 }
 
-fn collect_stmt_strings(stmt: &Stmt, globals: &mut HashMap<String, String>, counter: &mut i32) {
-    match stmt {
-        Stmt::Expr(e) => collect_expr_strings(e, globals, counter),
-        Stmt::If(_, then_stmts, else_stmts) => {
-            for s in then_stmts { collect_stmt_strings(s, globals, counter); }
-            for s in else_stmts { collect_stmt_strings(s, globals, counter); }
-        }
-        Stmt::While(_, body_stmts) => {
-            for s in body_stmts { collect_stmt_strings(s, globals, counter); }
-        }
-    }
-}
 
 fn collect_expr_strings(expr: &Expr, globals: &mut HashMap<String, String>, counter: &mut i32) {
     match expr {

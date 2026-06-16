@@ -12,6 +12,7 @@ pub enum Token {
     #[token("print")] Print,
     #[token("bridge")] Bridge,
     #[token("func")] Func,
+    #[token("return")] Return,
     #[token("->")] RArrow,
     #[token("if")] If,
     #[token("else")] Else,
@@ -42,7 +43,7 @@ pub enum Token {
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Identifier(String),
     
-    // 【修复】在 Token 层只存字符串，避免 f64 无法实现 Eq/Hash 的问题
+    // 【修复 1】Token 层只存 String，避免 f64 无法实现 Eq/Hash
     #[regex(r"-?[0-9]+\.[0-9]+", |lex| lex.slice().to_string())]
     FloatLit(String),
     
@@ -54,7 +55,7 @@ pub enum Token {
     
     #[token("Int")] TypeInt,
     #[token("Float")] TypeFloat,
-    #[token("String")] TypeString, // 【新增】Bridge 参数类型关键字
+    #[token("String")] TypeString,
 }
 
 impl fmt::Display for Token {
@@ -62,24 +63,24 @@ impl fmt::Display for Token {
         match self {
             Token::Let => write!(f, "let"), Token::Print => write!(f, "print"),
             Token::Bridge => write!(f, "bridge"), Token::Func => write!(f, "func"),
-            Token::RArrow => write!(f, "->"), Token::If => write!(f, "if"),
-            Token::Else => write!(f, "else"), Token::While => write!(f, "while"),
-            Token::True => write!(f, "true"), Token::False => write!(f, "false"),
-            Token::LBrace => write!(f, "{{"), Token::RBrace => write!(f, "}}"),
-            Token::Comma => write!(f, ","), Token::Semicolon => write!(f, ";"),
-            Token::Assign => write!(f, "="), Token::LParen => write!(f, "("),
-            Token::RParen => write!(f, ")"),
+            Token::Return => write!(f, "return"), Token::RArrow => write!(f, "->"),
+            Token::If => write!(f, "if"), Token::Else => write!(f, "else"),
+            Token::While => write!(f, "while"), Token::True => write!(f, "true"),
+            Token::False => write!(f, "false"), Token::LBrace => write!(f, "{{"),
+            Token::RBrace => write!(f, "}}"), Token::Comma => write!(f, ","),
+            Token::Semicolon => write!(f, ";"), Token::Assign => write!(f, "="),
+            Token::LParen => write!(f, "("), Token::RParen => write!(f, ")"),
             Token::Add => write!(f, "+"), Token::Sub => write!(f, "-"),
             Token::Mul => write!(f, "*"), Token::Div => write!(f, "/"),
             Token::EqEq => write!(f, "=="), Token::NotEq => write!(f, "!="),
             Token::Lt => write!(f, "<"), Token::Gt => write!(f, ">"),
             Token::Le => write!(f, "<="), Token::Ge => write!(f, ">="),
             Token::Identifier(s) => write!(f, "identifier '{}'", s),
-            Token::FloatLit(s) => write!(f, "float {}", s), // 【修复】
+            Token::FloatLit(s) => write!(f, "float {}", s),
             Token::Number(n) => write!(f, "number {}", n),
             Token::StringLit(s) => write!(f, "string '{}'", s),
             Token::TypeInt => write!(f, "Int"), Token::TypeFloat => write!(f, "Float"),
-            Token::TypeString => write!(f, "String"), // 【新增】
+            Token::TypeString => write!(f, "String"),
         }
     }
 }
@@ -87,7 +88,7 @@ impl fmt::Display for Token {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Expr {
     Number(i64),
-    FloatLit(f64), // 【新增】
+    FloatLit(f64),
     StringLit(String),
     Identifier(String),
     Bool(bool),
@@ -103,241 +104,236 @@ pub enum Stmt {
     Expr(Expr),
     If(Box<Expr>, Vec<Stmt>, Vec<Stmt>),
     While(Box<Expr>, Vec<Stmt>),
+    Return(Box<Expr>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum BridgeParam {
-    Param { name: String, ty: String },
+pub struct FuncParam { pub name: String, pub ty: String }
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct FuncDecl {
+    pub name: String,
+    pub params: Vec<FuncParam>,
+    pub ret_ty: String,
+    pub body: Vec<Stmt>,
 }
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum BridgeParam { Param { name: String, ty: String } }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum TopLevel {
-    BridgeDecl {
-        lang: String, lib: String, name: String,
-        params: Vec<BridgeParam>, ret_ty: String,
-    },
+    BridgeDecl { lang: String, lib: String, name: String, params: Vec<BridgeParam>, ret_ty: String },
     LetDecl { name: String, value: Box<Expr> },
+    FuncDecl(FuncDecl),
     Stmt(Stmt),
 }
 
 #[derive(Debug, Clone)]
-pub enum Value {
-    Number(i64),
-    Float(f64), // 【新增】
-    String(String),
-    Bool(bool),
-}
+pub enum ExecutionResult { Value(Value), Return(Value) }
+
+#[derive(Debug, Clone)]
+pub enum Value { Number(i64), Float(f64), String(String), Bool(bool) }
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Number(n) => write!(f, "{}", n),
-            Value::Float(n) => write!(f, "{}", n), // 【新增】
-            Value::String(s) => write!(f, "{}", s),
-            Value::Bool(b) => write!(f, "{}", b),
+            Value::Number(n) => write!(f, "{}", n), Value::Float(n) => write!(f, "{}", n),
+            Value::String(s) => write!(f, "{}", s), Value::Bool(b) => write!(f, "{}", b),
         }
     }
 }
 
 pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
-    // 1. 原子表达式
-    let atom = recursive(|atom| {
-        let num = select! { Token::Number(n) => Expr::Number(n) };
-            // 【修复】在 Parser 层将 String 解析为 f64
-        let float_num = select! { Token::FloatLit(s) => Expr::FloatLit(s.parse::<f64>().unwrap()) };
-        let str_lit = select! { Token::StringLit(s) => Expr::StringLit(s) };
-        let ident = select! { Token::Identifier(i) => Expr::Identifier(i) };
-        let bool_lit = select! { Token::True => Expr::Bool(true), Token::False => Expr::Bool(false) };
+    // 【核心修复】将整个表达式解析放入一个 recursive 闭包，让 call 能够引用完整的 expr
+    let expr = recursive(|expr| {
+        
+        // 1. 原子表达式
+        let atom = {
+            let num = select! { Token::Number(n) => Expr::Number(n) };
+            let float_num = select! { Token::FloatLit(s) => Expr::FloatLit(s.parse::<f64>().unwrap()) };
+            let str_lit = select! { Token::StringLit(s) => Expr::StringLit(s) };
+            let ident = select! { Token::Identifier(i) => Expr::Identifier(i) };
+            let bool_lit = select! { Token::True => Expr::Bool(true), Token::False => Expr::Bool(false) };
 
-        let call = select! { Token::Identifier(name) => name }
-            .then(just(Token::LParen))
-            .then(atom.clone().separated_by(just(Token::Comma)).allow_trailing())
-            .then(just(Token::RParen))
-            .map(|(((name, _lp), args), _rp)| Expr::Call(name, args));
+            // 【修复】函数调用和 Print 的参数使用完整的 expr，而不是 atom！
+            let call = select! { Token::Identifier(name) => name }
+                .then(just(Token::LParen))
+                .then(expr.clone().separated_by(just(Token::Comma)).allow_trailing())
+                .then(just(Token::RParen))
+                .map(|(((name, _lp), args), _rp)| Expr::Call(name, args));
 
-        let paren = just(Token::LParen)
-            .ignore_then(atom.clone())
-            .then_ignore(just(Token::RParen));
+            let paren = just(Token::LParen)
+                .ignore_then(expr.clone())
+                .then_ignore(just(Token::RParen));
 
-        let print_expr = just(Token::Print)
-            .then(just(Token::LParen))
-            .then(atom.clone())
-            .then(just(Token::RParen))
-            .map(|(((_print, _lp), e), _rp)| Expr::Print(Box::new(e)));
+            let print_expr = just(Token::Print)
+                .then(just(Token::LParen))
+                .then(expr.clone())
+                .then(just(Token::RParen))
+                .map(|(((_print, _lp), e), _rp)| Expr::Print(Box::new(e)));
 
-        print_expr.or(call).or(float_num).or(num).or(str_lit).or(ident).or(bool_lit).or(paren)
+            print_expr.or(call).or(float_num).or(num).or(str_lit).or(ident).or(bool_lit).or(paren)
+        };
+
+        // 2. 乘除 (高优先级)
+        let term = atom.clone().then(
+            just(Token::Mul).to("*".to_string()).or(just(Token::Div).to("/".to_string())).then(atom.clone()).repeated()
+        ).map(|(head, tail)| tail.into_iter().fold(head, |lhs, (op, rhs)| Expr::BinOp(Box::new(lhs), op, Box::new(rhs))));
+
+        // 3. 加减 (低优先级)
+        let bin_expr = term.clone().then(
+            just(Token::Add).to("+".to_string()).or(just(Token::Sub).to("-".to_string())).then(term.clone()).repeated()
+        ).map(|(head, tail)| tail.into_iter().fold(head, |lhs, (op, rhs)| Expr::BinOp(Box::new(lhs), op, Box::new(rhs))));
+
+        // 4. 比较 (最外层)
+        bin_expr.clone().then(
+            just(Token::EqEq).to("==".to_string()).or(just(Token::NotEq).to("!=".to_string()))
+                .or(just(Token::Lt).to("<".to_string())).or(just(Token::Gt).to(">".to_string()))
+                .or(just(Token::Le).to("<=".to_string())).or(just(Token::Ge).to(">=".to_string()))
+                .then(bin_expr.clone()).repeated()
+        ).map(|(head, tail)| tail.into_iter().fold(head, |lhs, (op, rhs)| Expr::Compare(Box::new(lhs), op, Box::new(rhs))))
     });
 
-    // 2. 乘除
-    let term = atom.clone().then(
-        just(Token::Mul).to("*".to_string()).or(just(Token::Div).to("/".to_string())).then(atom.clone()).repeated()
-    ).map(|(head, tail)| tail.into_iter().fold(head, |lhs, (op, rhs)| Expr::BinOp(Box::new(lhs), op, Box::new(rhs))));
-
-    // 3. 加减
-    let expr = term.clone().then(
-        just(Token::Add).to("+".to_string()).or(just(Token::Sub).to("-".to_string())).then(term.clone()).repeated()
-    ).map(|(head, tail)| tail.into_iter().fold(head, |lhs, (op, rhs)| Expr::BinOp(Box::new(lhs), op, Box::new(rhs))));
-
-    // 4. 比较
-    let compare = expr.clone().then(
-        just(Token::EqEq).to("==".to_string())
-            .or(just(Token::NotEq).to("!=".to_string()))
-            .or(just(Token::Lt).to("<".to_string()))
-            .or(just(Token::Gt).to(">".to_string()))
-            .or(just(Token::Le).to("<=".to_string()))
-            .or(just(Token::Ge).to(">=".to_string()))
-            .then(expr.clone())
-            .repeated()
-    ).map(|(head, tail)| tail.into_iter().fold(head, |lhs, (op, rhs)| Expr::Compare(Box::new(lhs), op, Box::new(rhs))));
-
-    // 5. 语句定义
+    // 5. 语句解析
     let stmt = recursive(|stmt| {
-        let block = just(Token::LBrace)
-            .ignore_then(stmt.repeated())
-            .then_ignore(just(Token::RBrace));
-
-        let if_stmt = just(Token::If)
-            .ignore_then(just(Token::LParen))
-            .ignore_then(compare.clone())
-            .then_ignore(just(Token::RParen))
-            .then(block.clone())
-            .then(just(Token::Else).ignore_then(block.clone()).or_not())
+        let block = just(Token::LBrace).ignore_then(stmt.repeated()).then_ignore(just(Token::RBrace));
+        let if_stmt = just(Token::If).ignore_then(just(Token::LParen)).ignore_then(expr.clone()).then_ignore(just(Token::RParen))
+            .then(block.clone()).then(just(Token::Else).ignore_then(block.clone()).or_not())
             .map(|((cond, then), else_block)| Stmt::If(Box::new(cond), then, else_block.unwrap_or_default()));
-
-        let while_stmt = just(Token::While)
-            .ignore_then(just(Token::LParen))
-            .ignore_then(compare.clone())
-            .then_ignore(just(Token::RParen))
-            .then(block.clone())
-            .map(|(cond, body)| Stmt::While(Box::new(cond), body));
-
-        let assign_stmt = select! { Token::Identifier(name) => name }
-            .then_ignore(just(Token::Assign))
-            .then(compare.clone())
-            .then_ignore(just(Token::Semicolon).or_not())
+        let while_stmt = just(Token::While).ignore_then(just(Token::LParen)).ignore_then(expr.clone()).then_ignore(just(Token::RParen))
+            .then(block.clone()).map(|(cond, body)| Stmt::While(Box::new(cond), body));
+        let return_stmt = just(Token::Return).ignore_then(expr.clone()).then_ignore(just(Token::Semicolon).or_not())
+            .map(|e| Stmt::Return(Box::new(e)));
+        let assign_stmt = select! { Token::Identifier(name) => name }.then_ignore(just(Token::Assign)).then(expr.clone()).then_ignore(just(Token::Semicolon).or_not())
             .map(|(name, value)| Stmt::Expr(Expr::Assign(name, Box::new(value))));
-
-        let expr_stmt = compare.clone()
-            .then_ignore(just(Token::Semicolon).or_not())
-            .map(Stmt::Expr);
-
-        if_stmt.or(while_stmt).or(assign_stmt).or(expr_stmt)
+        let expr_stmt = expr.clone().then_ignore(just(Token::Semicolon).or_not()).map(Stmt::Expr);
+        if_stmt.or(while_stmt).or(return_stmt).or(assign_stmt).or(expr_stmt)
     });
 
-    let block_for_top = just(Token::LBrace)
-        .ignore_then(stmt.repeated())
-        .then_ignore(just(Token::RBrace));
+    // 6. 函数声明解析
+    let func_param = select! { Token::Identifier(name) => name }
+        .then(just(Token::Assign))
+        .then(select! { Token::TypeInt => "Int".to_string() }.or(select! { Token::TypeFloat => "Float".to_string() }).or(select! { Token::TypeString => "String".to_string() }))
+        .map(|((name, _eq), ty)| FuncParam { name, ty });
+    let func_params_list = func_param.separated_by(just(Token::Comma)).allow_trailing();
 
-    let top_if = just(Token::If)
-        .ignore_then(just(Token::LParen))
-        .ignore_then(compare.clone())
-        .then_ignore(just(Token::RParen))
-        .then(block_for_top.clone())
-        .then(just(Token::Else).ignore_then(block_for_top.clone()).or_not())
-        .then_ignore(just(Token::Semicolon).or_not())
+       // 【核心修复】全面使用 .then_ignore() 丢弃符号，保留左侧提取的数据
+    let func_decl = just(Token::Func)
+        .ignore_then(select! { Token::Identifier(name) => name }) // 丢弃 Func，保留 name
+        .then_ignore(just(Token::LParen))                         // 保留 name，丢弃 (
+        .then(func_params_list)                                   // 提取 params，现在结果是 (name, params)
+        .then_ignore(just(Token::RParen))                         // 丢弃 )，保留 (name, params)
+        .then_ignore(just(Token::RArrow))                         // 丢弃 ->，保留 (name, params)
+        .then(
+            select! { Token::TypeInt => "Int".to_string() }
+            .or(select! { Token::TypeFloat => "Float".to_string() })
+            .or(select! { Token::TypeString => "String".to_string() })
+        ) // 提取 ret_ty，现在结果是 ((name, params), ret_ty)
+        .then_ignore(just(Token::LBrace))                         // 丢弃 {，保留 ((name, params), ret_ty)
+        .then(stmt.clone().repeated())                            // 提取 body，现在结果是 (((name, params), ret_ty), body)
+        .then_ignore(just(Token::RBrace))                         // 丢弃 }
+        .map(|(((name, params), ret_ty), body)| TopLevel::FuncDecl(FuncDecl { name, params, ret_ty, body }));
+
+    // 7. 顶层其他声明
+    let block_for_top = just(Token::LBrace).ignore_then(stmt.repeated()).then_ignore(just(Token::RBrace));
+    let top_if = just(Token::If).ignore_then(just(Token::LParen)).ignore_then(expr.clone()).then_ignore(just(Token::RParen))
+        .then(block_for_top.clone()).then(just(Token::Else).ignore_then(block_for_top.clone()).or_not()).then_ignore(just(Token::Semicolon).or_not())
         .map(|((cond, then), else_block)| TopLevel::Stmt(Stmt::If(Box::new(cond), then, else_block.unwrap_or_default())));
-
-    let top_while = just(Token::While)
-        .ignore_then(just(Token::LParen))
-        .ignore_then(compare.clone())
-        .then_ignore(just(Token::RParen))
-        .then(block_for_top.clone())
-        .then_ignore(just(Token::Semicolon).or_not())
+    let top_while = just(Token::While).ignore_then(just(Token::LParen)).ignore_then(expr.clone()).then_ignore(just(Token::RParen))
+        .then(block_for_top.clone()).then_ignore(just(Token::Semicolon).or_not())
         .map(|(cond, body)| TopLevel::Stmt(Stmt::While(Box::new(cond), body)));
-
-    let let_decl = just(Token::Let)
-        .ignore_then(select! { Token::Identifier(name) => name })
-        .then_ignore(just(Token::Assign))
-        .then(compare.clone())
-        .then_ignore(just(Token::Semicolon).or_not()) 
+    let let_decl = just(Token::Let).ignore_then(select! { Token::Identifier(name) => name }).then_ignore(just(Token::Assign)).then(expr.clone()).then_ignore(just(Token::Semicolon).or_not()) 
         .map(|(name, value)| TopLevel::LetDecl { name, value: Box::new(value) });
 
-    // 7. Bridge 声明 (支持 String 类型)
-    let param = select! { Token::Identifier(name) => name }
-        .then(just(Token::Assign))
-        .then(
-            select! { Token::TypeInt => "Int".to_string() }
-            .or(select! { Token::TypeFloat => "Float".to_string() })
-            .or(select! { Token::TypeString => "String".to_string() }) // 【新增】
-        )
+    let param = select! { Token::Identifier(name) => name }.then(just(Token::Assign))
+        .then(select! { Token::TypeInt => "Int".to_string() }.or(select! { Token::TypeFloat => "Float".to_string() }).or(select! { Token::TypeString => "String".to_string() }))
         .map(|((name, _eq), ty)| BridgeParam::Param { name, ty });
-        
     let params_list = param.separated_by(just(Token::Comma)).allow_trailing();
-    let bridge_decl = just(Token::Bridge)
-        .then(select! { Token::Identifier(lang) => lang })
-        .then(select! { Token::StringLit(lib) => lib })
-        .then(just(Token::LBrace)).then(just(Token::Func))
-        .then(select! { Token::Identifier(name) => name })
-        .then(just(Token::LParen)).then(params_list).then(just(Token::RParen))
-        .then(just(Token::RArrow))
-        .then(
-            select! { Token::TypeInt => "Int".to_string() }
-            .or(select! { Token::TypeFloat => "Float".to_string() })
-        )
+    let bridge_decl = just(Token::Bridge).then(select! { Token::Identifier(lang) => lang }).then(select! { Token::StringLit(lib) => lib })
+        .then(just(Token::LBrace)).then(just(Token::Func)).then(select! { Token::Identifier(name) => name })
+        .then(just(Token::LParen)).then(params_list).then(just(Token::RParen)).then(just(Token::RArrow))
+        .then(select! { Token::TypeInt => "Int".to_string() }.or(select! { Token::TypeFloat => "Float".to_string() }))
         .then(just(Token::RBrace))
         .map(|(((((((((((_bridge, lang), lib), _lb), _func), name), _lp), params), _rp), _ra), ret_ty), _rb)| {
             TopLevel::BridgeDecl { lang, lib, name, params, ret_ty }
         });
 
-    let top_stmt = compare
-        .then_ignore(just(Token::Semicolon).or_not())
-        .map(|e| TopLevel::Stmt(Stmt::Expr(e)));
+    let top_stmt = expr.then_ignore(just(Token::Semicolon).or_not()).map(|e| TopLevel::Stmt(Stmt::Expr(e)));
 
-    bridge_decl.or(let_decl).or(top_if).or(top_while).or(top_stmt)
-        .repeated()
-        .then_ignore(end())
+    bridge_decl.or(let_decl).or(func_decl).or(top_if).or(top_while).or(top_stmt).repeated().then_ignore(end())
 }
 
 pub struct Environment {
-    variables: HashMap<String, Value>,
+    pub variables: HashMap<String, Value>,
+    pub functions: HashMap<String, FuncDecl>, // 【修复】加上 pub，允许外部访问
 }
+
 impl Environment {
-    pub fn new() -> Self { Self { variables: HashMap::new() } }
-    pub fn eval(&mut self, stmt: &Stmt) -> Result<Value, String> {
+    pub fn new() -> Self { Self { variables: HashMap::new(), functions: HashMap::new() } }
+
+      // 【核心修复】让 return 信号能够穿透 if 和 while 块
+    pub fn eval_stmt(&mut self, stmt: &Stmt) -> Result<ExecutionResult, String> {
         match stmt {
-            Stmt::Expr(e) => self.eval_expr(e),
+            Stmt::Expr(e) => Ok(ExecutionResult::Value(self.eval_expr(e)?)),
             Stmt::If(cond, then, else_) => {
                 if let Value::Bool(b) = self.eval_expr(cond)? {
-                    if b { for s in then { self.eval(s)?; } }
-                    else { for s in else_ { self.eval(s)?; } }
-                    Ok(Value::Bool(b))
+                    if b { 
+                        for s in then { 
+                            let res = self.eval_stmt(s)?;
+                            // 【修复】如果遇到 return，立即向上穿透，不再执行后续语句
+                            if let ExecutionResult::Return(_) = res {
+                                return Ok(res); 
+                            }
+                        } 
+                    } else { 
+                        for s in else_ { 
+                            let res = self.eval_stmt(s)?;
+                            // 【修复】如果遇到 return，立即向上穿透
+                            if let ExecutionResult::Return(_) = res {
+                                return Ok(res); 
+                            }
+                        } 
+                    }
+                    Ok(ExecutionResult::Value(Value::Bool(b)))
                 } else { Err("Condition must be bool".into()) }
             }
             Stmt::While(cond, body) => {
                 while let Value::Bool(true) = self.eval_expr(cond)? {
-                    for s in body { self.eval(s)?; }
+                    for s in body { 
+                        let res = self.eval_stmt(s)?;
+                        // 【修复】循环体内的 return 也必须穿透
+                        if let ExecutionResult::Return(_) = res {
+                            return Ok(res); 
+                        }
+                    }
                 }
-                Ok(Value::Bool(false))
+                Ok(ExecutionResult::Value(Value::Bool(false)))
             }
+            Stmt::Return(e) => Ok(ExecutionResult::Return(self.eval_expr(e)?)),
         }
     }
+     
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, String> {
         match expr {
             Expr::Number(n) => Ok(Value::Number(*n)),
-            Expr::FloatLit(n) => Ok(Value::Float(*n)), // 【新增】
+            Expr::FloatLit(n) => Ok(Value::Float(*n)),
             Expr::StringLit(s) => Ok(Value::String(s.clone())),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Identifier(name) => self.variables.get(name).cloned().ok_or_else(|| format!("Undefined: {}", name)),
             Expr::BinOp(l, op, r) => {
-                let lv = self.eval_expr(l)?; 
-                let rv = self.eval_expr(r)?;
-                
-                // 【修复】使用 match 和引用 (&lv, &rv) 避免所有权移动
+                let lv = self.eval_expr(l)?; let rv = self.eval_expr(r)?;
                 match (&lv, &rv) {
-                    (Value::Float(a), Value::Float(b)) => {
-                        match op.as_str() {
-                            "+" => Ok(Value::Float(a + b)), "-" => Ok(Value::Float(a - b)),
-                            "*" => Ok(Value::Float(a * b)), "/" => Ok(Value::Float(a / b)),
-                            _ => Err("Unknown op".into()),
-                        }
-                    }
-                    (Value::Number(a), Value::Number(b)) => {
-                        match op.as_str() {
-                            "+" => Ok(Value::Number(a + b)), "-" => Ok(Value::Number(a - b)),
-                            "*" => Ok(Value::Number(a * b)), "/" => Ok(Value::Number(a / b)),
-                            _ => Err("Unknown op".into()),
-                        }
-                    }
+                    (Value::Float(a), Value::Float(b)) => match op.as_str() {
+                        "+" => Ok(Value::Float(a + b)), "-" => Ok(Value::Float(a - b)),
+                        "*" => Ok(Value::Float(a * b)), "/" => Ok(Value::Float(a / b)),
+                        _ => Err("Unknown op".into()),
+                    },
+                    (Value::Number(a), Value::Number(b)) => match op.as_str() {
+                        "+" => Ok(Value::Number(a + b)), "-" => Ok(Value::Number(a - b)),
+                        "*" => Ok(Value::Number(a * b)), "/" => Ok(Value::Number(a / b)),
+                        _ => Err("Unknown op".into()),
+                    },
                     _ => Err("Type mismatch".into()),
                 }
             }
@@ -345,8 +341,7 @@ impl Environment {
                 let lv = self.eval_expr(l)?; let rv = self.eval_expr(r)?;
                 if let (Value::Number(a), Value::Number(b)) = (lv, rv) {
                     let res = match op.as_str() {
-                        "==" => a == b, "!=" => a != b, "<" => a < b, ">" => a > b, "<=" => a <= b, ">=" => a >= b,
-                        _ => false,
+                        "==" => a == b, "!=" => a != b, "<" => a < b, ">" => a > b, "<=" => a <= b, ">=" => a >= b, _ => false,
                     };
                     Ok(Value::Bool(res))
                 } else { Err("Type mismatch".into()) }
@@ -357,7 +352,32 @@ impl Environment {
                 Ok(v)
             }
             Expr::Print(e) => { let v = self.eval_expr(e)?; println!("Arc Output > {}", v); Ok(v) }
-            Expr::Call(name, _) => Err(format!("Bridge '{}' not supported in interpreter.", name)),
+            
+            // 【核心修复 4】使用 .cloned() 解决借用冲突！
+            Expr::Call(name, args) => {
+                if let Some(func) = self.functions.get(name).cloned() { 
+                    if args.len() != func.params.len() {
+                        return Err(format!("Function '{}' expects {} args, got {}", name, func.params.len(), args.len()));
+                    }
+                    let mut new_env = Environment::new();
+                    new_env.variables = self.variables.clone(); 
+                    new_env.functions = self.functions.clone();
+
+                    for (i, arg) in args.iter().enumerate() {
+                        let val = self.eval_expr(arg)?;
+                        new_env.variables.insert(func.params[i].name.clone(), val);
+                    }
+                    for s in &func.body {
+                        match new_env.eval_stmt(s)? {
+                            ExecutionResult::Return(val) => return Ok(val),
+                            ExecutionResult::Value(_) => continue,
+                        }
+                    }
+                    Ok(Value::Number(0)) 
+                } else {
+                    Err(format!("Bridge function '{}' not supported in interpreter.", name))
+                }
+            }
         }
     }
 }
