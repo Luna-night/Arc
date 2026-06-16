@@ -20,6 +20,10 @@ pub enum Token {
     #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().unwrap())]
     Number(i64),
     
+    // 【新增】匹配双引号内的字符串，并去掉首尾的引号
+    #[regex(r#""[^"]*""#, |lex| lex.slice()[1..lex.slice().len()-1].to_string())]
+    StringLit(String),
+
     #[token("=")]
     Assign,
     #[token(";")]
@@ -52,10 +56,19 @@ impl fmt::Display for Token {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Expr {
     Number(i64),
+    StringLit(String), 
     Identifier(String),
     Print(Box<Expr>),
 }
-
+// 让 Value 能够被打印
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Number(n) => write!(f, "{}", n),
+            Value::String(s) => write!(f, "{}", s),
+        }
+    }
+}
 // 使用 chumsky 的 recursive 来构建解析器，这是处理表达式最标准的方法
 pub fn parser() -> impl Parser<Token, Vec<Expr>, Error = Simple<Token>> {
     // 定义递归的表达式解析器
@@ -66,12 +79,12 @@ pub fn parser() -> impl Parser<Token, Vec<Expr>, Error = Simple<Token>> {
         // 解析 print(...)
         let print_expr = just(Token::Print)
             .ignore_then(just(Token::LParen))
-            .ignore_then(expr) // 这里使用递归传入的 expr
+            .ignore_then(expr.clone()) // 注意这里加了 .clone()
             .then_ignore(just(Token::RParen))
             .map(|e| Expr::Print(Box::new(e)));
 
-        // 优先级：print 表达式优先，然后是数字，最后是标识符
-        print_expr.or(num).or(ident)
+          // 【修改】加入 str_lit
+        print_expr.or(num).or(str_lit).or(ident)
     });
 
     // 解析由多个表达式组成的序列，直到文件结束
@@ -80,7 +93,7 @@ pub fn parser() -> impl Parser<Token, Vec<Expr>, Error = Simple<Token>> {
 
 // 解释器环境
 pub struct Environment {
-    variables: HashMap<String, i64>,
+    variables: HashMap<String, Value>, // 【修改】改为 Value
 }
 
 impl Environment {
@@ -88,15 +101,17 @@ impl Environment {
         Self { variables: HashMap::new() }
     }
 
-    pub fn eval(&mut self, expr: &Expr) -> Result<i64, String> {
+    // 【修改】返回 Result<Value, String>
+    pub fn eval(&mut self, expr: &Expr) -> Result<Value, String> {
         match expr {
-            Expr::Number(n) => Ok(*n),
+            Expr::Number(n) => Ok(Value::Number(*n)),
+            Expr::StringLit(s) => Ok(Value::String(s.clone())), // 【新增】
             Expr::Identifier(name) => {
-                self.variables.get(name).copied().ok_or_else(|| format!("Undefined variable: {}", name))
+                self.variables.get(name).cloned().ok_or_else(|| format!("Undefined variable: {}", name))
             }
             Expr::Print(e) => {
                 let val = self.eval(e)?;
-                println!("Arc Output > {}", val);
+                println!("Arc Output > {}", val); // 利用 Display trait 打印
                 Ok(val)
             }
         }

@@ -29,7 +29,8 @@ fn main() {
                 // 【解释模式】
                 let mut env = arc_core::Environment::new();
                 for expr in &ast {
-                    let _ = env.eval(expr);
+                    // eval 现在返回 Result<Value, String>，我们直接忽略 Ok 里的值，或者可以打印出来
+                    let _ = env.eval(expr); 
                 }
             } 
             else if command == "build" {
