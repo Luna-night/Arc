@@ -46,6 +46,7 @@ fn main() {
                 let status = Command::new("clang")
                     .arg(ll_filename)
                     .arg("-O3")
+                    .arg("-lm") // 【新增】链接数学库
                     .arg("-o")
                     .arg(output_bin)
                     .status()
