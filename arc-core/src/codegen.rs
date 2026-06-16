@@ -3,7 +3,6 @@ use std::collections::HashMap;
 
 pub fn compile_to_llvm_ir(ast: &[TopLevel]) -> String {
     let mut ir_globals = String::new();
-    // 【核心修复】使用 Vec 维护块的创建顺序，确保输出顺序正确
     let mut blocks: Vec<(String, String)> = vec![("entry".to_string(), String::new())];
     let mut current_block = "entry".to_string();
 
@@ -68,12 +67,10 @@ pub fn compile_to_llvm_ir(ast: &[TopLevel]) -> String {
         }
     }
 
-    // 在最后一个块添加返回指令
     emit(&mut blocks, &current_block, "  ret i32 0\n");
 
     let mut final_ir = ir_globals;
     final_ir.push_str("define i32 @main() {\n");
-    // 【核心修复】按 Vec 的顺序输出块，确保寄存器编号递增
     for (name, code) in &blocks {
         final_ir.push_str(&format!("{}:\n", name));
         final_ir.push_str(code);
@@ -83,7 +80,6 @@ pub fn compile_to_llvm_ir(ast: &[TopLevel]) -> String {
     final_ir
 }
 
-// 【核心修复】emit 函数改为在 Vec 中查找并追加
 fn emit(blocks: &mut Vec<(String, String)>, block_name: &str, instruction: &str) {
     if let Some((_, code)) = blocks.iter_mut().find(|(name, _)| name == block_name) {
         code.push_str(instruction);
@@ -108,7 +104,6 @@ fn gen_stmt(stmt: &Stmt, blocks: &mut Vec<(String, String)>, current_block: &mut
             let else_lbl = new_label(block_cnt);
             let merge_lbl = new_label(block_cnt);
             
-            // 【核心修复】使用 push 按顺序添加新块
             blocks.push((then_lbl.clone(), String::new()));
             blocks.push((else_lbl.clone(), String::new()));
             blocks.push((merge_lbl.clone(), String::new()));
@@ -123,6 +118,33 @@ fn gen_stmt(stmt: &Stmt, blocks: &mut Vec<(String, String)>, current_block: &mut
             for s in else_stmts { gen_stmt(s, blocks, current_block, reg, block_cnt, vars, strings, ast); }
             emit(blocks, current_block, &format!("  br label %{}\n", merge_lbl));
 
+            *current_block = merge_lbl;
+        }
+        // 【新增】While 循环代码生成
+        Stmt::While(cond, body_stmts) => {
+            let cond_lbl = new_label(block_cnt);
+            let body_lbl = new_label(block_cnt);
+            let merge_lbl = new_label(block_cnt);
+
+            blocks.push((cond_lbl.clone(), String::new()));
+            blocks.push((body_lbl.clone(), String::new()));
+            blocks.push((merge_lbl.clone(), String::new()));
+
+            // 1. 无条件跳转到条件判断块
+            emit(blocks, current_block, &format!("  br label %{}\n", cond_lbl));
+
+            // 2. 生成条件判断块
+            *current_block = cond_lbl.clone();
+            let (cond_reg, _) = gen_expr(cond, blocks, current_block, reg, vars, strings, ast);
+            emit(blocks, current_block, &format!("  br i1 {}, label %{}, label %{}\n", cond_reg, body_lbl, merge_lbl));
+
+            // 3. 生成循环体块
+            *current_block = body_lbl.clone();
+            for s in body_stmts { gen_stmt(s, blocks, current_block, reg, block_cnt, vars, strings, ast); }
+            // 循环体执行完后，无条件跳回条件判断块 (Back-edge)
+            emit(blocks, current_block, &format!("  br label %{}\n", cond_lbl));
+
+            // 4. 切换到合并块继续后续代码
             *current_block = merge_lbl;
         }
     }
@@ -245,6 +267,10 @@ fn collect_stmt_strings(stmt: &Stmt, globals: &mut HashMap<String, String>, coun
         Stmt::If(_, then_stmts, else_stmts) => {
             for s in then_stmts { collect_stmt_strings(s, globals, counter); }
             for s in else_stmts { collect_stmt_strings(s, globals, counter); }
+        }
+        // 【新增】递归收集 While 块内的字符串
+        Stmt::While(_, body_stmts) => {
+            for s in body_stmts { collect_stmt_strings(s, globals, counter); }
         }
     }
 }

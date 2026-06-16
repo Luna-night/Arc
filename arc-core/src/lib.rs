@@ -15,6 +15,7 @@ pub enum Token {
     #[token("->")] RArrow,
     #[token("if")] If,
     #[token("else")] Else,
+    #[token("while")] While, // 【新增】
     #[token("true")] True,
     #[token("false")] False,
     
@@ -57,8 +58,8 @@ impl fmt::Display for Token {
             Token::Let => write!(f, "let"), Token::Print => write!(f, "print"),
             Token::Bridge => write!(f, "bridge"), Token::Func => write!(f, "func"),
             Token::RArrow => write!(f, "->"), Token::If => write!(f, "if"),
-            Token::Else => write!(f, "else"), Token::True => write!(f, "true"),
-            Token::False => write!(f, "false"),
+            Token::Else => write!(f, "else"), Token::While => write!(f, "while"), // 【新增】
+            Token::True => write!(f, "true"), Token::False => write!(f, "false"),
             Token::LBrace => write!(f, "{{"), Token::RBrace => write!(f, "}}"),
             Token::Comma => write!(f, ","), Token::Semicolon => write!(f, ";"),
             Token::Assign => write!(f, "="), Token::LParen => write!(f, "("),
@@ -93,6 +94,7 @@ pub enum Expr {
 pub enum Stmt {
     Expr(Expr),
     If(Box<Expr>, Vec<Stmt>, Vec<Stmt>),
+    While(Box<Expr>, Vec<Stmt>), // 【新增】
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -176,9 +178,8 @@ pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
             .repeated()
     ).map(|(head, tail)| tail.into_iter().fold(head, |lhs, (op, rhs)| Expr::Compare(Box::new(lhs), op, Box::new(rhs))));
 
-    // 5. 【核心修复】使用 recursive 定义 stmt，解决 block 的循环引用问题
+    // 5. 语句定义
     let stmt = recursive(|stmt| {
-        // 块: { stmts }
         let block = just(Token::LBrace)
             .ignore_then(stmt.repeated())
             .then_ignore(just(Token::RBrace));
@@ -191,6 +192,14 @@ pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
             .then(just(Token::Else).ignore_then(block.clone()).or_not())
             .map(|((cond, then), else_block)| Stmt::If(Box::new(cond), then, else_block.unwrap_or_default()));
 
+        // 【新增】While 语句解析
+        let while_stmt = just(Token::While)
+            .ignore_then(just(Token::LParen))
+            .ignore_then(compare.clone())
+            .then_ignore(just(Token::RParen))
+            .then(block.clone())
+            .map(|(cond, body)| Stmt::While(Box::new(cond), body));
+
         let assign_stmt = select! { Token::Identifier(name) => name }
             .then_ignore(just(Token::Assign))
             .then(compare.clone())
@@ -201,10 +210,9 @@ pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
             .then_ignore(just(Token::Semicolon).or_not())
             .map(Stmt::Expr);
 
-        if_stmt.or(assign_stmt).or(expr_stmt)
+        if_stmt.or(while_stmt).or(assign_stmt).or(expr_stmt)
     });
 
-    // 顶层 If (复用 stmt 来构建 block)
     let block_for_top = just(Token::LBrace)
         .ignore_then(stmt.repeated())
         .then_ignore(just(Token::RBrace));
@@ -216,6 +224,14 @@ pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
         .then(block_for_top.clone())
         .then(just(Token::Else).ignore_then(block_for_top.clone()).or_not())
         .map(|((cond, then), else_block)| TopLevel::Stmt(Stmt::If(Box::new(cond), then, else_block.unwrap_or_default())));
+
+    // 【新增】顶层 While 语句
+    let top_while = just(Token::While)
+        .ignore_then(just(Token::LParen))
+        .ignore_then(compare.clone())
+        .then_ignore(just(Token::RParen))
+        .then(block_for_top.clone())
+        .map(|(cond, body)| TopLevel::Stmt(Stmt::While(Box::new(cond), body)));
 
     // 6. Let 声明
     let let_decl = just(Token::Let)
@@ -244,9 +260,28 @@ pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
             TopLevel::BridgeDecl { lang, lib, name, params, ret_ty }
         });
 
-    let top_stmt = compare.map(|e| TopLevel::Stmt(Stmt::Expr(e)));
+        let top_if = just(Token::If)
+        .ignore_then(just(Token::LParen))
+        .ignore_then(compare.clone())
+        .then_ignore(just(Token::RParen))
+        .then(block_for_top.clone())
+        .then(just(Token::Else).ignore_then(block_for_top.clone()).or_not())
+        .then_ignore(just(Token::Semicolon).or_not()) // 【修复】顶层 if 也消耗可选分号
+        .map(|((cond, then), else_block)| TopLevel::Stmt(Stmt::If(Box::new(cond), then, else_block.unwrap_or_default())));
 
-    bridge_decl.or(let_decl).or(top_if).or(top_stmt)
+    let top_while = just(Token::While)
+        .ignore_then(just(Token::LParen))
+        .ignore_then(compare.clone())
+        .then_ignore(just(Token::RParen))
+        .then(block_for_top.clone())
+        .then_ignore(just(Token::Semicolon).or_not()) // 【修复】顶层 while 也消耗可选分号
+        .map(|(cond, body)| TopLevel::Stmt(Stmt::While(Box::new(cond), body)));
+
+    let top_stmt = compare
+        .then_ignore(just(Token::Semicolon).or_not()) // 【修复】顶层普通语句消耗可选分号
+        .map(|e| TopLevel::Stmt(Stmt::Expr(e)));
+
+    bridge_decl.or(let_decl).or(top_if).or(top_while).or(top_stmt)
         .repeated()
         .then_ignore(end())
 }
@@ -265,6 +300,13 @@ impl Environment {
                     else { for s in else_ { self.eval(s)?; } }
                     Ok(Value::Bool(b))
                 } else { Err("Condition must be bool".into()) }
+            }
+            // 【新增】While 解释器逻辑
+            Stmt::While(cond, body) => {
+                while let Value::Bool(true) = self.eval_expr(cond)? {
+                    for s in body { self.eval(s)?; }
+                }
+                Ok(Value::Bool(false))
             }
         }
     }
