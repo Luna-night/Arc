@@ -90,6 +90,18 @@ pub fn compile_to_llvm_ir(ast: &[TopLevel]) -> String {
             TopLevel::Stmt(stmt) => {
                 gen_stmt(stmt, &mut main_blocks, &mut main_current_block, &mut main_reg_counter, &mut block_counter, &main_vars, &string_globals, ast);
             }
+            // 【新增】在 AOT 编译时，为系统声明生成初始化日志
+            TopLevel::SystemDecl { units } => {
+                emit(&mut main_blocks, &main_current_block, "  // [A.R.C.A.E.A. SYSTEM] Declarative configuration parsed\n");
+                for unit in units {
+                    let msg = match unit {
+                        crate::SystemUnit::Package { name, .. } => format!("  [PACKAGE] {} anchored.", name),
+                        crate::SystemUnit::Service { name, .. } => format!("  [SERVICE] {} registered.", name),
+                    };
+                    // 简单起见，这里只生成注释。若要生成 printf，可复用 Print 逻辑。
+                    emit(&mut main_blocks, &main_current_block, &format!("  // {}\n", msg));
+                }
+            }
             _ => {}
         }
     }

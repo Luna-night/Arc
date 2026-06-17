@@ -23,22 +23,27 @@ fn main() {
     
     match parser().parse(tokens) {
         Ok(ast) => {
-             if command == "run" {
+                         if command == "run" {
                 let mut env = arc_core::Environment::new();
                 
-                // 【新增】先注册所有函数
+                // 1. 先注册所有函数
                 for top_level in &ast {
                     if let arc_core::TopLevel::FuncDecl(func) = top_level {
                         env.functions.insert(func.name.clone(), func.clone());
                     }
                 }
 
-                // 然后执行其他语句
+                // 2. 执行普通语句和系统声明
                 for top_level in &ast {
-                    if let arc_core::TopLevel::Stmt(stmt) = top_level {
-                        let _ = env.eval_stmt(stmt);
+                    match top_level {
+                        arc_core::TopLevel::Stmt(stmt) => {
+                            let _ = env.eval_stmt(stmt);
+                        }
+                        arc_core::TopLevel::SystemDecl { units } => {
+                            env.eval_system_decl(units); // 【新增】调用专门的系统声明处理逻辑
+                        }
+                        _ => {}
                     }
-                    // LetDecl 在解释器中暂时忽略，或者你可以自己实现
                 }
             } 
             else if command == "build" {

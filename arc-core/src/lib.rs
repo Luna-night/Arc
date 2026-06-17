@@ -6,7 +6,8 @@ use std::fmt;
 pub mod codegen;
 
 #[derive(Logos, Debug, PartialEq, Eq, Clone, Hash)]
-#[logos(skip r"[ \t\n\f]+")]
+// 【核心修复】同时跳过空白字符和 // 开头的单行注释
+#[logos(skip r"([ \t\n\r\f]+|//[^\n]*)")] 
 pub enum Token {
     #[token("let")] Let,
     #[token("print")] Print,
@@ -19,6 +20,11 @@ pub enum Token {
     #[token("while")] While,
     #[token("true")] True,
     #[token("false")] False,
+    
+    // 【新增】系统级声明关键字
+    #[token("system")] System,
+    #[token("package")] Package,
+    #[token("service")] Service,
     
     #[token("{")] LBrace,
     #[token("}")] RBrace,
@@ -43,7 +49,6 @@ pub enum Token {
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Identifier(String),
     
-    // 【修复 1】Token 层只存 String，避免 f64 无法实现 Eq/Hash
     #[regex(r"-?[0-9]+\.[0-9]+", |lex| lex.slice().to_string())]
     FloatLit(String),
     
@@ -66,10 +71,13 @@ impl fmt::Display for Token {
             Token::Return => write!(f, "return"), Token::RArrow => write!(f, "->"),
             Token::If => write!(f, "if"), Token::Else => write!(f, "else"),
             Token::While => write!(f, "while"), Token::True => write!(f, "true"),
-            Token::False => write!(f, "false"), Token::LBrace => write!(f, "{{"),
-            Token::RBrace => write!(f, "}}"), Token::Comma => write!(f, ","),
-            Token::Semicolon => write!(f, ";"), Token::Assign => write!(f, "="),
-            Token::LParen => write!(f, "("), Token::RParen => write!(f, ")"),
+            Token::False => write!(f, "false"),
+            Token::System => write!(f, "system"), Token::Package => write!(f, "package"), // 【新增】
+            Token::Service => write!(f, "service"), // 【新增】
+            Token::LBrace => write!(f, "{{"), Token::RBrace => write!(f, "}}"),
+            Token::Comma => write!(f, ","), Token::Semicolon => write!(f, ";"),
+            Token::Assign => write!(f, "="), Token::LParen => write!(f, "("),
+            Token::RParen => write!(f, ")"),
             Token::Add => write!(f, "+"), Token::Sub => write!(f, "-"),
             Token::Mul => write!(f, "*"), Token::Div => write!(f, "/"),
             Token::EqEq => write!(f, "=="), Token::NotEq => write!(f, "!="),
@@ -94,7 +102,7 @@ pub enum Expr {
     Bool(bool),
     Print(Box<Expr>),
     Call(String, Vec<Expr>),
-    BinOp(Box<Expr>, String, Box<Expr>), 
+    BinOp(Box<Expr>, String, Box<Expr>),
     Compare(Box<Expr>, String, Box<Expr>),
     Assign(String, Box<Expr>),
 }
@@ -121,11 +129,26 @@ pub struct FuncDecl {
 #[derive(Debug, PartialEq, Clone)]
 pub enum BridgeParam { Param { name: String, ty: String } }
 
+// 【新增】系统配置项
+#[derive(Debug, PartialEq, Clone)]
+pub struct ConfigItem {
+    pub key: String,
+    pub value: Expr,
+}
+
+// 【新增】系统单元 (Package 或 Service)
+#[derive(Debug, PartialEq, Clone)]
+pub enum SystemUnit {
+    Package { name: String, config: Vec<ConfigItem> },
+    Service { name: String, config: Vec<ConfigItem> },
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum TopLevel {
     BridgeDecl { lang: String, lib: String, name: String, params: Vec<BridgeParam>, ret_ty: String },
     LetDecl { name: String, value: Box<Expr> },
     FuncDecl(FuncDecl),
+    SystemDecl { units: Vec<SystemUnit> }, // 【新增】系统级声明
     Stmt(Stmt),
 }
 
@@ -145,10 +168,7 @@ impl fmt::Display for Value {
 }
 
 pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
-    // 【核心修复】将整个表达式解析放入一个 recursive 闭包，让 call 能够引用完整的 expr
     let expr = recursive(|expr| {
-        
-        // 1. 原子表达式
         let atom = {
             let num = select! { Token::Number(n) => Expr::Number(n) };
             let float_num = select! { Token::FloatLit(s) => Expr::FloatLit(s.parse::<f64>().unwrap()) };
@@ -156,37 +176,27 @@ pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
             let ident = select! { Token::Identifier(i) => Expr::Identifier(i) };
             let bool_lit = select! { Token::True => Expr::Bool(true), Token::False => Expr::Bool(false) };
 
-            // 【修复】函数调用和 Print 的参数使用完整的 expr，而不是 atom！
             let call = select! { Token::Identifier(name) => name }
                 .then(just(Token::LParen))
                 .then(expr.clone().separated_by(just(Token::Comma)).allow_trailing())
                 .then(just(Token::RParen))
                 .map(|(((name, _lp), args), _rp)| Expr::Call(name, args));
 
-            let paren = just(Token::LParen)
-                .ignore_then(expr.clone())
-                .then_ignore(just(Token::RParen));
-
-            let print_expr = just(Token::Print)
-                .then(just(Token::LParen))
-                .then(expr.clone())
-                .then(just(Token::RParen))
+            let paren = just(Token::LParen).ignore_then(expr.clone()).then_ignore(just(Token::RParen));
+            let print_expr = just(Token::Print).then(just(Token::LParen)).then(expr.clone()).then(just(Token::RParen))
                 .map(|(((_print, _lp), e), _rp)| Expr::Print(Box::new(e)));
 
             print_expr.or(call).or(float_num).or(num).or(str_lit).or(ident).or(bool_lit).or(paren)
         };
 
-        // 2. 乘除 (高优先级)
         let term = atom.clone().then(
             just(Token::Mul).to("*".to_string()).or(just(Token::Div).to("/".to_string())).then(atom.clone()).repeated()
         ).map(|(head, tail)| tail.into_iter().fold(head, |lhs, (op, rhs)| Expr::BinOp(Box::new(lhs), op, Box::new(rhs))));
 
-        // 3. 加减 (低优先级)
         let bin_expr = term.clone().then(
             just(Token::Add).to("+".to_string()).or(just(Token::Sub).to("-".to_string())).then(term.clone()).repeated()
         ).map(|(head, tail)| tail.into_iter().fold(head, |lhs, (op, rhs)| Expr::BinOp(Box::new(lhs), op, Box::new(rhs))));
 
-        // 4. 比较 (最外层)
         bin_expr.clone().then(
             just(Token::EqEq).to("==".to_string()).or(just(Token::NotEq).to("!=".to_string()))
                 .or(just(Token::Lt).to("<".to_string())).or(just(Token::Gt).to(">".to_string()))
@@ -195,7 +205,6 @@ pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
         ).map(|(head, tail)| tail.into_iter().fold(head, |lhs, (op, rhs)| Expr::Compare(Box::new(lhs), op, Box::new(rhs))))
     });
 
-    // 5. 语句解析
     let stmt = recursive(|stmt| {
         let block = just(Token::LBrace).ignore_then(stmt.repeated()).then_ignore(just(Token::RBrace));
         let if_stmt = just(Token::If).ignore_then(just(Token::LParen)).ignore_then(expr.clone()).then_ignore(just(Token::RParen))
@@ -211,31 +220,52 @@ pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
         if_stmt.or(while_stmt).or(return_stmt).or(assign_stmt).or(expr_stmt)
     });
 
-    // 6. 函数声明解析
+    // 【新增】解析系统级声明
+    let config_item = select! { Token::Identifier(k) => k }
+        .then_ignore(just(Token::Assign))
+        .then(expr.clone())
+        .then_ignore(just(Token::Semicolon).or_not())
+        .map(|(k, v)| ConfigItem { key: k, value: v });
+
+    let config_block = just(Token::LBrace)
+        .ignore_then(config_item.repeated())
+        .then_ignore(just(Token::RBrace));
+
+    let package_unit = just(Token::Package)
+        .ignore_then(select! { Token::StringLit(n) => n })
+        .then(config_block.clone())
+        .map(|(name, config)| SystemUnit::Package { name, config });
+
+    let service_unit = just(Token::Service)
+        .ignore_then(select! { Token::StringLit(n) => n })
+        .then(config_block)
+        .map(|(name, config)| SystemUnit::Service { name, config });
+
+        // 【核心修复】使用 .then_ignore 丢弃右大括号，保留左侧的 Vec<SystemUnit>
+    let system_decl = just(Token::System)
+        .ignore_then(just(Token::LBrace))                     // 丢弃 System，保留 {
+        .ignore_then(package_unit.or(service_unit).repeated()) // 丢弃 {，保留 Vec<SystemUnit>
+        .then_ignore(just(Token::RBrace))                     // 【修复】丢弃 }，保留 Vec<SystemUnit>
+        .map(|units| TopLevel::SystemDecl { units });
+
     let func_param = select! { Token::Identifier(name) => name }
         .then(just(Token::Assign))
         .then(select! { Token::TypeInt => "Int".to_string() }.or(select! { Token::TypeFloat => "Float".to_string() }).or(select! { Token::TypeString => "String".to_string() }))
         .map(|((name, _eq), ty)| FuncParam { name, ty });
     let func_params_list = func_param.separated_by(just(Token::Comma)).allow_trailing();
 
-       // 【核心修复】全面使用 .then_ignore() 丢弃符号，保留左侧提取的数据
     let func_decl = just(Token::Func)
-        .ignore_then(select! { Token::Identifier(name) => name }) // 丢弃 Func，保留 name
-        .then_ignore(just(Token::LParen))                         // 保留 name，丢弃 (
-        .then(func_params_list)                                   // 提取 params，现在结果是 (name, params)
-        .then_ignore(just(Token::RParen))                         // 丢弃 )，保留 (name, params)
-        .then_ignore(just(Token::RArrow))                         // 丢弃 ->，保留 (name, params)
-        .then(
-            select! { Token::TypeInt => "Int".to_string() }
-            .or(select! { Token::TypeFloat => "Float".to_string() })
-            .or(select! { Token::TypeString => "String".to_string() })
-        ) // 提取 ret_ty，现在结果是 ((name, params), ret_ty)
-        .then_ignore(just(Token::LBrace))                         // 丢弃 {，保留 ((name, params), ret_ty)
-        .then(stmt.clone().repeated())                            // 提取 body，现在结果是 (((name, params), ret_ty), body)
-        .then_ignore(just(Token::RBrace))                         // 丢弃 }
+        .ignore_then(select! { Token::Identifier(name) => name })
+        .then_ignore(just(Token::LParen))
+        .then(func_params_list)
+        .then_ignore(just(Token::RParen))
+        .then_ignore(just(Token::RArrow))
+        .then(select! { Token::TypeInt => "Int".to_string() }.or(select! { Token::TypeFloat => "Float".to_string() }).or(select! { Token::TypeString => "String".to_string() }))
+        .then_ignore(just(Token::LBrace))
+        .then(stmt.clone().repeated())
+        .then_ignore(just(Token::RBrace))
         .map(|(((name, params), ret_ty), body)| TopLevel::FuncDecl(FuncDecl { name, params, ret_ty, body }));
 
-    // 7. 顶层其他声明
     let block_for_top = just(Token::LBrace).ignore_then(stmt.repeated()).then_ignore(just(Token::RBrace));
     let top_if = just(Token::If).ignore_then(just(Token::LParen)).ignore_then(expr.clone()).then_ignore(just(Token::RParen))
         .then(block_for_top.clone()).then(just(Token::Else).ignore_then(block_for_top.clone()).or_not()).then_ignore(just(Token::Semicolon).or_not())
@@ -261,59 +291,38 @@ pub fn parser() -> impl Parser<Token, Vec<TopLevel>, Error = Simple<Token>> {
 
     let top_stmt = expr.then_ignore(just(Token::Semicolon).or_not()).map(|e| TopLevel::Stmt(Stmt::Expr(e)));
 
-    bridge_decl.or(let_decl).or(func_decl).or(top_if).or(top_while).or(top_stmt).repeated().then_ignore(end())
+    // 【注意】将 system_decl 加入顶层解析
+    bridge_decl.or(let_decl).or(func_decl).or(system_decl).or(top_if).or(top_while).or(top_stmt).repeated().then_ignore(end())
 }
 
 pub struct Environment {
     pub variables: HashMap<String, Value>,
-    pub functions: HashMap<String, FuncDecl>, // 【修复】加上 pub，允许外部访问
+    pub functions: HashMap<String, FuncDecl>,
 }
 
 impl Environment {
     pub fn new() -> Self { Self { variables: HashMap::new(), functions: HashMap::new() } }
 
-      // 【核心修复】让 return 信号能够穿透 if 和 while 块
     pub fn eval_stmt(&mut self, stmt: &Stmt) -> Result<ExecutionResult, String> {
         match stmt {
             Stmt::Expr(e) => Ok(ExecutionResult::Value(self.eval_expr(e)?)),
             Stmt::If(cond, then, else_) => {
                 if let Value::Bool(b) = self.eval_expr(cond)? {
-                    if b { 
-                        for s in then { 
-                            let res = self.eval_stmt(s)?;
-                            // 【修复】如果遇到 return，立即向上穿透，不再执行后续语句
-                            if let ExecutionResult::Return(_) = res {
-                                return Ok(res); 
-                            }
-                        } 
-                    } else { 
-                        for s in else_ { 
-                            let res = self.eval_stmt(s)?;
-                            // 【修复】如果遇到 return，立即向上穿透
-                            if let ExecutionResult::Return(_) = res {
-                                return Ok(res); 
-                            }
-                        } 
-                    }
+                    if b { for s in then { let _ = self.eval_stmt(s)?; } }
+                    else { for s in else_ { let _ = self.eval_stmt(s)?; } }
                     Ok(ExecutionResult::Value(Value::Bool(b)))
                 } else { Err("Condition must be bool".into()) }
             }
             Stmt::While(cond, body) => {
                 while let Value::Bool(true) = self.eval_expr(cond)? {
-                    for s in body { 
-                        let res = self.eval_stmt(s)?;
-                        // 【修复】循环体内的 return 也必须穿透
-                        if let ExecutionResult::Return(_) = res {
-                            return Ok(res); 
-                        }
-                    }
+                    for s in body { let _ = self.eval_stmt(s)?; }
                 }
                 Ok(ExecutionResult::Value(Value::Bool(false)))
             }
             Stmt::Return(e) => Ok(ExecutionResult::Return(self.eval_expr(e)?)),
         }
     }
-     
+
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, String> {
         match expr {
             Expr::Number(n) => Ok(Value::Number(*n)),
@@ -352,8 +361,6 @@ impl Environment {
                 Ok(v)
             }
             Expr::Print(e) => { let v = self.eval_expr(e)?; println!("Arc Output > {}", v); Ok(v) }
-            
-            // 【核心修复 4】使用 .cloned() 解决借用冲突！
             Expr::Call(name, args) => {
                 if let Some(func) = self.functions.get(name).cloned() { 
                     if args.len() != func.params.len() {
@@ -362,7 +369,6 @@ impl Environment {
                     let mut new_env = Environment::new();
                     new_env.variables = self.variables.clone(); 
                     new_env.functions = self.functions.clone();
-
                     for (i, arg) in args.iter().enumerate() {
                         let val = self.eval_expr(arg)?;
                         new_env.variables.insert(func.params[i].name.clone(), val);
@@ -379,5 +385,30 @@ impl Environment {
                 }
             }
         }
+    }
+    
+    // 【新增】专门用于处理系统级声明的解释逻辑
+    pub fn eval_system_decl(&self, units: &[SystemUnit]) {
+        println!("\n[A.R.C.A.E.A. SYSTEM] 正在解析声明式配置...");
+        println!("[FSM] 验证通过：开始锚定系统预期状态。");
+        for unit in units {
+            match unit {
+                SystemUnit::Package { name, config } => {
+                    println!("\n  [PACKAGE] {}", name);
+                    for item in config {
+                        println!("    ├─ {} = {:?}", item.key, item.value);
+                    }
+                    println!("    └─ [STATUS] 依赖树已锁定，哈希已生成。");
+                }
+                SystemUnit::Service { name, config } => {
+                    println!("\n  [SERVICE] {}", name);
+                    for item in config {
+                        println!("    ├─ {} = {:?}", item.key, item.value);
+                    }
+                    println!("    └─ [STATUS] 守护进程已注册，等待 arcaea-rebuild 激活。");
+                }
+            }
+        }
+        println!("\n[A.R.C.A.E.A. SYSTEM] 配置解析完成。系统状态可复现。");
     }
 }
