@@ -1,0 +1,12 @@
+// arcaeaOS 声明式系统配置
+system {
+    package "nginx" {
+        state = "enabled";
+        port = 8080;
+    }
+    service "arcaea-core" {
+        bind = "0.0.0.0:8080";
+        auto_restart = true;
+    }
+}
+print("System configuration loaded successfully.");

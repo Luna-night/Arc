@@ -1,19 +1,17 @@
-# Rust 编译产物
+# Rust compiled artifacts
 /target/
 **/*.rs.bk
-Cargo.lock
 
-# Node.js / VS Code 插件编译产物
-arc-language/node_modules/
-arc-language/out/
-.vscode-test/
-
-# Arc 编译器生成的临时文件
-arc_out.ll
+# Arcaea Compiler outputs
+*.ll
 arc_app
-arc_app.exe
-test.arc
+arc_out.ll
 
-# 操作系统文件
+# arcaeaOS Generation Store (Local state)
+/arcaea_store/
+
+# OS / Editor
 .DS_Store
-Thumbs.db
+.idea/
+.vscode/
+*.swp
