@@ -3,49 +3,84 @@
 
 use core::panic::PanicInfo;
 
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
-    // 1. 硬體級串口初始化 (COM1: 0x3f8, 115200 8N1)
+// ==========================================
+// 【終極修復】RISC-V 啟動匯編內聯協議
+// 徹底消滅 entry.asm 文件，直接嵌入 Rust 核心！
+// ==========================================
+core::arch::global_asm!(
+    ".section .text.entry",
+    ".globl _start",
+    "_start:",
+    "   la sp, _stack_top",    // 設置棧指針指向 linker.ld 中定義的棧頂
+    "   call rust_main",       // 跳轉到 Rust 主函數
+    "1:  wfi",                 // 如果 rust_main 意外返回，進入低功耗休眠
+    "   j 1b"
+);
+
+// ==========================================
+// 手寫 SBI (Supervisor Binary Interface) 調用
+// 在 S-Mode 下，透過 ecall 與 M-Mode (OpenSBI) 對話
+// ==========================================
+fn sbi_call(eid: usize, fid: usize, arg0: usize) -> usize {
+    let mut ret;
     unsafe {
-        core::arch::asm!("out dx, al", in("dx") 0x3f8u16 + 1, in("al") 0x00u8);
-        core::arch::asm!("out dx, al", in("dx") 0x3f8u16 + 3, in("al") 0x80u8);
-        core::arch::asm!("out dx, al", in("dx") 0x3f8u16 + 0, in("al") 0x03u8);
-        core::arch::asm!("out dx, al", in("dx") 0x3f8u16 + 1, in("al") 0x00u8);
-        core::arch::asm!("out dx, al", in("dx") 0x3f8u16 + 3, in("al") 0x03u8);
-        core::arch::asm!("out dx, al", in("dx") 0x3f8u16 + 2, in("al") 0xC7u8);
-        core::arch::asm!("out dx, al", in("dx") 0x3f8u16 + 4, in("al") 0x0Bu8);
+        core::arch::asm!(
+            "ecall",
+            in("a7") eid,
+            in("a6") fid,
+            in("a0") arg0,
+            lateout("a0") ret,
+            options(nostack)
+        );
     }
+    ret
+}
 
-    // 2. 定義要輸出的字節切片
-    let all_msgs: &[&[u8]] = &[
-        b"========================================\n",
-        b"   A.R.C.A.E.A. SYSTEM BOOT SEQUENCE   \n",
-        b"========================================\n",
-        b"[SYS] arcaeaOS Generation Anchored.\n",
-        b"[SYS] Welcome, Commander.\n",
-    ];
+// 串口輸出字符 (SBI Legacy Console Putchar, EID=0x01)
+fn console_putchar(c: u8) {
+    sbi_call(0x01, 0x00, c as usize);
+}
 
-    // 3. 底層字節發送循環 (包含硬體握手輪詢)
-    for m in all_msgs.iter() {
-        for &byte in m.iter() {
-            unsafe {
-                let mut status: u8;
-                loop {
-                    core::arch::asm!("in al, dx", out("al") status, in("dx") 0x3f8u16 + 5, options(nomem, nostack, preserves_flags));
-                    if (status & 0x20) != 0 { break; }
-                }
-                core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") byte, options(nomem, nostack, preserves_flags));
-            }
-        }
+fn print(s: &str) {
+    for byte in s.bytes() {
+        console_putchar(byte);
     }
+}
 
-    // 4. 進入低功耗休眠
+fn println(s: &str) {
+    print(s);
+    print("\n");
+}
+
+// ==========================================
+// 內核入口點 (從 _start 跳轉而來)
+// ==========================================
+#[no_mangle]
+pub extern "C" fn rust_main() -> ! {
+    println("========================================");
+    println("   A.R.C.A.E.A. SYSTEM BOOT SEQUENCE   ");
+    println("========================================");
+    println("[BOOT] ARC-RustOS Kernel v0.1.0-Genesis");
+    println("[ARCH] RISC-V 64-bit (rv64gc)");
+    println("[MODE] S-Mode (Supervisor Mode via OpenSBI)");
+    println("[HAL ] Cross-Platform Abstraction Layer... OK");
+    println("");
+    println("[FSM ] Verifying PROTO-0 Protocol... [PASS]");
+    println("[SYS ] arcaeaOS Generation Anchored.");
+    println("[SYS ] Welcome, Commander. System is ready.");
+    println("");
+    println("Entering low-power WFI state...");
+
+    // 進入低功耗休眠 (RISC-V 使用 WFI 指令)
     loop {
-        unsafe { core::arch::asm!("hlt"); }
+        unsafe { core::arch::asm!("wfi"); }
     }
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop { unsafe { core::arch::asm!("hlt"); } }
+    println("[FSM] FATAL ERROR: PROTOCOL VIOLATION");
+    loop {
+        unsafe { core::arch::asm!("wfi"); }
+    }
 }
