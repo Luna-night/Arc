@@ -3,8 +3,8 @@ name = "arcaea-os"
 version = "0.1.0"
 edition = "2021"
 
-# 【核心策略】不依賴任何第三方 OS 庫 (sbi-rt, riscv-rt 等)
-# 完全使用 Rust 核心庫 (core) 和手寫匯編，確保絕對的編譯穩定性
+# 【核心確認】RISC-V 架構使用 OpenSBI，絕對不需要 bootloader crate！
+# 移除所有依賴，讓 serde_core 的幽靈徹底消散
 [dependencies]
 
 [profile.dev]
@@ -12,3 +12,5 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+lto = true
+opt-level = "s"

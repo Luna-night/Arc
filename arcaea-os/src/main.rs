@@ -1,3 +1,4 @@
+// arcaea-os/src/main.rs
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
@@ -5,10 +6,16 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
+// 引入底层模块
 mod allocator;
 mod trap;
-mod log; // 【新增】引入異步日誌模組
 
+// 引入 ACTP 编译器生成的组件代码
+include!("generated.rs");
+
+// ==========================================
+// RISC-V 启动汇编入口
+// ==========================================
 core::arch::global_asm!(
     ".section .text.entry",
     ".globl _start",
@@ -19,6 +26,9 @@ core::arch::global_asm!(
     "   j 1b"
 );
 
+// ==========================================
+// SBI 底层通讯与打印宏 (供全项目调用)
+// ==========================================
 fn sbi_call(eid: usize, fid: usize, arg0: usize) -> usize {
     let mut ret;
     unsafe {
@@ -31,7 +41,6 @@ fn sbi_call(eid: usize, fid: usize, arg0: usize) -> usize {
     ret
 }
 
-// 【新增】暴露單字符打印，供 log 模組在安全上下文中調用
 pub fn sbi_print_char(c: u8) {
     sbi_call(0x01, 0x00, c as usize);
 }
@@ -42,6 +51,7 @@ pub fn sbi_print(s: &str) {
     }
 }
 
+// 【关键】使用 #[macro_export] 让 allocator.rs 和 trap.rs 也能调用
 #[macro_export]
 macro_rules! sbi_println {
     ($s:expr) => {
@@ -50,20 +60,25 @@ macro_rules! sbi_println {
     };
 }
 
-include!("generated.rs");
-
+// ==========================================
+// 内存分配错误处理
+// ==========================================
 #[alloc_error_handler]
 fn alloc_error(_layout: core::alloc::Layout) -> ! {
     sbi_println!("[ALLOC] FATAL: Out of memory!");
     loop { unsafe { core::arch::asm!("wfi"); } }
 }
 
+// ==========================================
+// 内核主入口
+// ==========================================
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
     sbi_println!("========================================");
     sbi_println!("   A.R.C.A.E.A. SYSTEM BOOT SEQUENCE   ");
     sbi_println!("========================================");
     
+    // 1. 初始化底层硬件
     trap::init_trap();
     unsafe { allocator::ALLOCATOR.init(); }
     
@@ -71,24 +86,26 @@ pub extern "C" fn rust_main() -> ! {
     sbi_println!("[ARCH] RISC-V 64-bit (rv64gc)");
     sbi_println!("");
     
+    // 2. 运行 ACTP 声明式组件 (内存读写测试)
     sbi_println!("[FSM] Initializing Stable Components...");
     lca_driver::init();
     sbi_println!("[SYS ] arcaeaOS Generation Anchored.");
     sbi_println!("");
     
-    // 【核心測試】觸發 ecall 異常 (注意：絕對不能用 ebreak，會觸發 LLVM Panic)
+    // 3. 触发异常测试 (验证 Trap Handler 安全返回)
     sbi_println!("[TEST] Triggering ecall exception...");
     unsafe { core::arch::asm!("ecall"); }
     
-    // 【核心修復】在主程序安全上下文中，刷新 Trap Handler 記錄的日誌！
-    sbi_println!("[TEST] Flushing async trap logs...");
-    crate::log::flush_logs();
-    
     sbi_println!("[TEST] Returned from exception successfully!");
     sbi_println!("[HAL ] Entering low-power hibernation...");
+    
+    // 4. 进入休眠
     hal_riscv::enter_hibernation()
 }
 
+// ==========================================
+// Panic 处理
+// ==========================================
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     sbi_println!("[FSM] FATAL ERROR: PROTOCOL VIOLATION");

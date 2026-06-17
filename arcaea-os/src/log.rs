@@ -1,42 +1,31 @@
 // arcaea-os/src/log.rs
 pub const LOG_BUF_SIZE: usize = 512;
 static mut LOG_BUF: [u8; LOG_BUF_SIZE] = [0; LOG_BUF_SIZE];
-static mut LOG_HEAD: usize = 0; // 寫入位置
-static mut LOG_TAIL: usize = 0; // 讀取位置
+static mut LOG_HEAD: usize = 0; // 写入位置 (Trap Handler 操作)
+static mut LOG_TAIL: usize = 0; // 读取位置 (主循环操作)
 
-// 【核心】在 Trap 上下文中調用，必須極速且安全（無鎖，單核環境下依靠極簡邏輯）
-pub unsafe fn trap_log_write(s: &str) {
-    for &c in s.as_bytes() {
-        let next_head = (LOG_HEAD + 1) % LOG_BUF_SIZE;
-        if next_head != LOG_TAIL {
+// 【核心标志】通知主循环需要重新设置定时器
+pub static mut TIMER_NEED_REARM: bool = false;
+
+// 【核心】在 Trap Handler (中断上下文) 中调用。
+// 绝对安全：只写内存，不阻塞，不调用 ecall！
+pub unsafe fn trap_log(s: &str) {
+    for c in s.bytes() {
+        let next = (LOG_HEAD + 1) % LOG_BUF_SIZE;
+        if next != LOG_TAIL {
             LOG_BUF[LOG_HEAD] = c;
-            LOG_HEAD = next_head;
-        } else {
-            break; // 緩衝區滿，丟棄新字符以防覆蓋未讀數據
+            LOG_HEAD = next;
         }
+        // 如果缓冲区满了，丢弃新字符，防止覆盖未读数据
     }
 }
 
-// 輔助函數：將 usize 轉為 hex 字串寫入 buffer
-pub unsafe fn trap_log_write_hex(val: usize) {
-    let hex = b"0123456789abcdef";
-    let mut buf = [0u8; 18]; // "0x" + 16 chars
-    buf[0] = b'0';
-    buf[1] = b'x';
-    for i in 0..16 {
-        let nibble = (val >> ((15 - i) * 4)) & 0xF;
-        buf[2 + i] = hex[nibble as usize];
-    }
-    trap_log_write(core::str::from_utf8_unchecked(&buf));
-}
-
+// 【核心】在主循环 (安全上下文) 中调用。
+// 安全地通过 SBI 打印缓冲区内容。
 pub fn flush_logs() {
-    unsafe {
-        while LOG_HEAD != LOG_TAIL {
-            let c = LOG_BUF[LOG_TAIL];
-            LOG_TAIL = (LOG_TAIL + 1) % LOG_BUF_SIZE;
-            // 調用主程序暴露的安全打印函數
-            crate::sbi_print_char(c);
-        }
+    while unsafe { LOG_HEAD != LOG_TAIL } {
+        let c = unsafe { LOG_BUF[LOG_TAIL] };
+        unsafe { LOG_TAIL = (LOG_TAIL + 1) % LOG_BUF_SIZE; }
+        crate::sbi_print_char(c);
     }
 }

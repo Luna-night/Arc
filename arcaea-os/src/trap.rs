@@ -1,4 +1,8 @@
 // arcaea-os/src/trap.rs
+
+// ==========================================
+// RISC-V S-mode Trap 處理入口 (彙編)
+// ==========================================
 core::arch::global_asm!(
     ".section .text.trap",
     ".globl trap_handler_entry",
@@ -26,6 +30,9 @@ core::arch::global_asm!(
     "sret"
 );
 
+// ==========================================
+// Rust 層面的 Trap 處理函數 (絕對純淨版)
+// ==========================================
 #[no_mangle]
 pub extern "C" fn rust_trap_handler(_trap_frame: *mut usize) {
     let scause: usize;
@@ -34,34 +41,25 @@ pub extern "C" fn rust_trap_handler(_trap_frame: *mut usize) {
         core::arch::asm!("csrr {}, scause", out(reg) scause);
         core::arch::asm!("csrr {}, sepc", out(reg) sepc);
     }
-    
+
+    // 區分中斷 (Interrupt) 和異常 (Exception)
     let is_interrupt = (scause & 0x8000000000000000) != 0;
-    let cause_code = scause & 0x7FFFFFFFFFFFFFFF;
-    
-    // 忽略異步中斷（如定時器中斷）
-    if is_interrupt { return; }
-    
-    // 【核心修復】極速寫入異步日誌緩衝區，絕不阻塞，絕不觸發嵌套異常！
+    let _cause_code = scause & 0x7FFFFFFFFFFFFFFF;
+
+    // 【核心修復】忽略所有異步中斷（如定時器中斷），絕對不修改 sepc，也不引用任何外部變量！
+    if is_interrupt {
+        return;
+    }
+
+    // 對於異常，跳過導致異常的指令 (sepc + 4)
     unsafe {
-        crate::log::trap_log_write("\r\n[TRAP] Exception detected! scause=");
-        crate::log::trap_log_write_hex(cause_code);
-        crate::log::trap_log_write("\r\n");
-        
-        if cause_code == 9 {
-            crate::log::trap_log_write("[TRAP] Type: Environment Call (ecall)\r\n");
-        } else if cause_code == 3 {
-            crate::log::trap_log_write("[TRAP] Type: Breakpoint (ebreak)\r\n");
-        } else if cause_code == 13 {
-            crate::log::trap_log_write("[TRAP] Type: Load Access Fault\r\n");
-        } else {
-            crate::log::trap_log_write("[TRAP] Type: Unknown Exception\r\n");
-        }
-        
-        // 跳過導致異常的指令 (sepc + 4)
         core::arch::asm!("csrw sepc, {}", in(reg) sepc + 4);
     }
 }
 
+// ==========================================
+// 初始化 Trap 向量表
+// ==========================================
 pub fn init_trap() {
     unsafe {
         core::arch::asm!(

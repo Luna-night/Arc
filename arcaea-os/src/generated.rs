@@ -4,37 +4,47 @@
 // ==========================================
 
 pub mod lca_driver {
-            // 【核心修復】使用靜態數組，確保在合法內存範圍內
-            static mut TEST_BUFFER: [u8; 4096] = [0; 4096];
-            
-            pub fn init() {
-                crate::sbi_println!("[LCA] Initializing Crystal Storage...");
-                
-                unsafe {
-                    let ptr = TEST_BUFFER.as_mut_ptr();
-                    
-                    // 【測試 1】寫入
-                    core::ptr::write_bytes(ptr, 0xAA, 4096);
-                    crate::sbi_println!("[LCA] Data written: 0xAA pattern to static buffer");
-
-                    // 【測試 2】讀取驗證
-                    let first = core::ptr::read_volatile(ptr);
-                    let last = core::ptr::read_volatile(ptr.add(4095));
-                    
-                    if first == 0xAA && last == 0xAA {
-                        crate::sbi_println!("[LCA] Verification PASSED! Memory R/W OK.");
-                    } else {
-                        crate::sbi_println!("[LCA] Verification FAILED!");
-                    }
-                }
-                
-                crate::sbi_println!("[LCA] Crystal Storage Online.");
+    pub fn init() {
+        crate::sbi_println!("[LCA] Initializing Crystal Storage...");
+        
+        // 【核心升级】引入 alloc crate 的 Vec
+        use alloc::vec::Vec;
+        
+        crate::sbi_println!("[LCA] Allocating dynamic vector...");
+        let mut data: Vec<u8> = Vec::with_capacity(1024);
+        
+        // 写入测试数据
+        for i in 0..1024 {
+            data.push((i % 256) as u8);
+        }
+        
+        crate::sbi_println!("[LCA] Vector capacity: 1024 bytes allocated dynamically!");
+        
+        // 验证数据
+        let mut check_passed = true;
+        for i in 0..1024 {
+            if data[i] != (i % 256) as u8 {
+                check_passed = false;
+                break;
             }
+        }
+        
+        if check_passed {
+            crate::sbi_println!("[LCA] Verification PASSED! Dynamic Memory R/W OK.");
+        } else {
+            crate::sbi_println!("[LCA] Verification FAILED!");
+        }
+        
+        // Vec 离开作用域，自动调用 GlobalAlloc::dealloc 释放内存！
+        crate::sbi_println!("[LCA] Dropping vector, memory will be deallocated automatically.");
+        
+        crate::sbi_println!("[LCA] Crystal Storage Online.");
+    }
 }
 
 pub mod hal_riscv {
-            pub fn enter_hibernation() -> ! {
-                loop { unsafe { core::arch::asm!("wfi"); } }
-            }
+    pub fn enter_hibernation() -> ! {
+        loop { unsafe { core::arch::asm!("wfi"); } }
+    }
 }
 
