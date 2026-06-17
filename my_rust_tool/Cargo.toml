@@ -1,0 +1,10 @@
+[package]
+name = "my_rust_tool"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "my_rust_tool"
+path = "src/main.rs"
+
+[workspace]

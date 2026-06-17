@@ -1,0 +1,13 @@
+// arcaeaOS 声明式配置
+system {
+    package "nginx" {
+        state = "enabled";
+        port = 8080;
+    }
+
+    package "my_rust_tool" {
+        source = "cargo";
+        path = "./my_rust_tool";
+        auto_restart = true;
+    }
+}
