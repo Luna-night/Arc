@@ -1,0 +1,25 @@
+{
+  "name": "arcaea-lang-support",
+  "displayName": "Arcaea Language Support",
+  "description": "Syntax highlighting and language basics for the Arcaea programming language (arcaeaOS core).",
+  "version": "0.1.0",
+  "engines": { "vscode": "^1.50.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "arcaea",
+        "aliases": ["Arcaea", "arcaea"],
+        "extensions": [".arcaea", ".arc"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "arcaea",
+        "scopeName": "source.arcaea",
+        "path": "./syntaxes/arcaea.tmLanguage.json"
+      }
+    ]
+  }
+}
