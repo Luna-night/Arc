@@ -1,86 +1,96 @@
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
+extern crate alloc;
 
 use core::panic::PanicInfo;
 
-// ==========================================
-// 【終極修復】RISC-V 啟動匯編內聯協議
-// 徹底消滅 entry.asm 文件，直接嵌入 Rust 核心！
-// ==========================================
+mod allocator;
+mod trap;
+mod log; // 【新增】引入異步日誌模組
+
 core::arch::global_asm!(
     ".section .text.entry",
     ".globl _start",
     "_start:",
-    "   la sp, _stack_top",    // 設置棧指針指向 linker.ld 中定義的棧頂
-    "   call rust_main",       // 跳轉到 Rust 主函數
-    "1:  wfi",                 // 如果 rust_main 意外返回，進入低功耗休眠
+    "   la sp, _stack_top",
+    "   call rust_main",
+    "1:  wfi",
     "   j 1b"
 );
 
-// ==========================================
-// 手寫 SBI (Supervisor Binary Interface) 調用
-// 在 S-Mode 下，透過 ecall 與 M-Mode (OpenSBI) 對話
-// ==========================================
 fn sbi_call(eid: usize, fid: usize, arg0: usize) -> usize {
     let mut ret;
     unsafe {
         core::arch::asm!(
             "ecall",
-            in("a7") eid,
-            in("a6") fid,
-            in("a0") arg0,
-            lateout("a0") ret,
+            in("a7") eid, in("a6") fid, in("a0") arg0, lateout("a0") ret,
             options(nostack)
         );
     }
     ret
 }
 
-// 串口輸出字符 (SBI Legacy Console Putchar, EID=0x01)
-fn console_putchar(c: u8) {
+// 【新增】暴露單字符打印，供 log 模組在安全上下文中調用
+pub fn sbi_print_char(c: u8) {
     sbi_call(0x01, 0x00, c as usize);
 }
 
-fn print(s: &str) {
+pub fn sbi_print(s: &str) {
     for byte in s.bytes() {
-        console_putchar(byte);
+        sbi_print_char(byte);
     }
 }
 
-fn println(s: &str) {
-    print(s);
-    print("\n");
+#[macro_export]
+macro_rules! sbi_println {
+    ($s:expr) => {
+        $crate::sbi_print($s);
+        $crate::sbi_print("\r\n");
+    };
 }
 
-// ==========================================
-// 內核入口點 (從 _start 跳轉而來)
-// ==========================================
+include!("generated.rs");
+
+#[alloc_error_handler]
+fn alloc_error(_layout: core::alloc::Layout) -> ! {
+    sbi_println!("[ALLOC] FATAL: Out of memory!");
+    loop { unsafe { core::arch::asm!("wfi"); } }
+}
+
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
-    println("========================================");
-    println("   A.R.C.A.E.A. SYSTEM BOOT SEQUENCE   ");
-    println("========================================");
-    println("[BOOT] ARC-RustOS Kernel v0.1.0-Genesis");
-    println("[ARCH] RISC-V 64-bit (rv64gc)");
-    println("[MODE] S-Mode (Supervisor Mode via OpenSBI)");
-    println("[HAL ] Cross-Platform Abstraction Layer... OK");
-    println("");
-    println("[FSM ] Verifying PROTO-0 Protocol... [PASS]");
-    println("[SYS ] arcaeaOS Generation Anchored.");
-    println("[SYS ] Welcome, Commander. System is ready.");
-    println("");
-    println("Entering low-power WFI state...");
-
-    // 進入低功耗休眠 (RISC-V 使用 WFI 指令)
-    loop {
-        unsafe { core::arch::asm!("wfi"); }
-    }
+    sbi_println!("========================================");
+    sbi_println!("   A.R.C.A.E.A. SYSTEM BOOT SEQUENCE   ");
+    sbi_println!("========================================");
+    
+    trap::init_trap();
+    unsafe { allocator::ALLOCATOR.init(); }
+    
+    sbi_println!("[BOOT] ARC-RustOS Kernel v0.1.0-Genesis");
+    sbi_println!("[ARCH] RISC-V 64-bit (rv64gc)");
+    sbi_println!("");
+    
+    sbi_println!("[FSM] Initializing Stable Components...");
+    lca_driver::init();
+    sbi_println!("[SYS ] arcaeaOS Generation Anchored.");
+    sbi_println!("");
+    
+    // 【核心測試】觸發 ecall 異常 (注意：絕對不能用 ebreak，會觸發 LLVM Panic)
+    sbi_println!("[TEST] Triggering ecall exception...");
+    unsafe { core::arch::asm!("ecall"); }
+    
+    // 【核心修復】在主程序安全上下文中，刷新 Trap Handler 記錄的日誌！
+    sbi_println!("[TEST] Flushing async trap logs...");
+    crate::log::flush_logs();
+    
+    sbi_println!("[TEST] Returned from exception successfully!");
+    sbi_println!("[HAL ] Entering low-power hibernation...");
+    hal_riscv::enter_hibernation()
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    println("[FSM] FATAL ERROR: PROTOCOL VIOLATION");
-    loop {
-        unsafe { core::arch::asm!("wfi"); }
-    }
+    sbi_println!("[FSM] FATAL ERROR: PROTOCOL VIOLATION");
+    loop { unsafe { core::arch::asm!("wfi"); } }
 }

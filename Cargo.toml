@@ -1,3 +1,3 @@
 [workspace]
-members = ["arc-core", "arc-cli", "arc-lsp", "arcaea-os"]
+members = ["arc-core", "arc-cli", "arc-lsp", "arcaea-os", "actp-compiler"]
 resolver = "2"
